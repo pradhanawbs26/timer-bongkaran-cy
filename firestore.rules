@@ -1,0 +1,60 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // Global safety net: default deny
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // Helper to validate string bounds
+    function isValidString(val, maxLen) {
+      return val is string && val.size() <= maxLen;
+    }
+
+    // Helper to validate session ID
+    function isValidId(id) {
+      return id is string && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    // Validation for SessionState structure
+    function isValidSession(data) {
+      return data.keys().hasAll(['isSessionActive'])
+        && data.isSessionActive is bool
+        && (!data.keys().contains('startTime') || data.startTime == null || isValidString(data.startTime, 100))
+        && (!data.keys().contains('trainsetId') || data.trainsetId == null || isValidString(data.trainsetId, 100))
+        && (!data.keys().contains('supervisorName') || data.supervisorName == null || isValidString(data.supervisorName, 100))
+        && (!data.keys().contains('containersUnloaded') || data.containersUnloaded is int)
+        && (!data.keys().contains('breachedAlertSent') || data.breachedAlertSent is bool)
+        && (!data.keys().contains('finalBreachedAlertSent') || data.finalBreachedAlertSent is bool)
+        && (!data.keys().contains('isPaused') || data.isPaused is bool)
+        && (!data.keys().contains('previouslyAccumulatedSeconds') || data.previouslyAccumulatedSeconds is int)
+        && (!data.keys().contains('resumeTime') || data.resumeTime == null || isValidString(data.resumeTime, 100));
+    }
+
+    // Validation for HistoryItem structure
+    function isValidHistoryItem(data) {
+      return data.keys().hasAll(['id', 'trainsetId', 'startTime', 'endTime', 'actualDurationMinutes', 'targetMinutes', 'containersUnloaded', 'targetVolume', 'status'])
+        && isValidString(data.id, 128)
+        && isValidString(data.trainsetId, 100)
+        && isValidString(data.startTime, 100)
+        && isValidString(data.endTime, 100)
+        && data.actualDurationMinutes is int
+        && data.targetMinutes is int
+        && data.containersUnloaded is int
+        && data.targetVolume is int
+        && (data.status == 'ON_TIME' || data.status == 'OVERTIME');
+    }
+
+    // Match sessions/current doc
+    match /sessions/{sessionId} {
+      allow read: if isValidId(sessionId);
+      allow write: if isValidId(sessionId) && isValidSession(request.resource.data);
+    }
+
+    // Match history items
+    match /history/{itemId} {
+      allow read: if true;
+      allow write: if isValidId(itemId) && isValidHistoryItem(request.resource.data);
+    }
+  }
+}
