@@ -11,9 +11,9 @@ service cloud.firestore {
       return val is string && val.size() <= maxLen;
     }
 
-    // Helper to validate session ID
+    // Helper to validate session/document ID
     function isValidId(id) {
-      return id is string && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+      return id is string && id.size() > 0 && id.size() <= 128;
     }
 
     // Validation for SessionState structure
@@ -45,10 +45,25 @@ service cloud.firestore {
         && (data.status == 'ON_TIME' || data.status == 'OVERTIME');
     }
 
+    // Validation for WhatsAppConfig structure
+    function isValidWhatsAppConfig(data) {
+      return data.keys().hasAll(['webhookUrl', 'token', 'groupId'])
+        && isValidString(data.webhookUrl, 500)
+        && isValidString(data.token, 500)
+        && isValidString(data.groupId, 200)
+        && (!data.keys().contains('enabled') || data.enabled is bool);
+    }
+
     // Match sessions/current doc
     match /sessions/{sessionId} {
       allow read: if isValidId(sessionId);
       allow write: if isValidId(sessionId) && isValidSession(request.resource.data);
+    }
+
+    // Match settings documents (like whatsapp config)
+    match /settings/{settingsId} {
+      allow read: if true;
+      allow write: if isValidId(settingsId) && (settingsId != 'whatsapp' || isValidWhatsAppConfig(request.resource.data));
     }
 
     // Match history items

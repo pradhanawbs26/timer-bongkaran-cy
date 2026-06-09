@@ -41,9 +41,9 @@ import { db, handleFirestoreError, OperationType } from './lib/firebase';
 import { doc, onSnapshot, setDoc, collection, query, orderBy } from 'firebase/firestore';
 
 // Default configuration variables
-const DEFAULT_WEBHOOK_URL = 'https://api.whatsapp-gateway.com/send';
-const DEFAULT_TOKEN = 'token_bongkaran_cy_prod_abc123';
-const DEFAULT_GROUP_ID = 'CY_Coal_Unloading_Alerts_Group_A';
+const DEFAULT_WEBHOOK_URL = 'https://api.fonnte.com/send';
+const DEFAULT_TOKEN = 'hTzLch6T7FhjWU9LunBo';
+const DEFAULT_GROUP_ID = '628117882902-1623340497@g.us';
 const UNLOADING_TARGET_MINUTES = 120; // Target duration 120 minutes
 const UNLOADING_TARGET_CONTAINERS = 122; // Target volume: 122 containers
 
@@ -61,6 +61,22 @@ export default function App() {
       enabled: true,
     };
   });
+
+  // --- Form Inputs for WhatsApp Configurations ---
+  const [inputWebhookUrl, setInputWebhookUrl] = useState<string>('');
+  const [inputToken, setInputToken] = useState<string>('');
+  const [inputGroupId, setInputGroupId] = useState<string>('');
+  const [isConfigSaving, setIsConfigSaving] = useState<boolean>(false);
+  const [configSaveSuccess, setConfigSaveSuccess] = useState<boolean>(false);
+
+  // Synchronize local input form fields whenever central configurations change
+  useEffect(() => {
+    if (whatsappConfig) {
+      setInputWebhookUrl(whatsappConfig.webhookUrl || DEFAULT_WEBHOOK_URL);
+      setInputToken(whatsappConfig.token || DEFAULT_TOKEN);
+      setInputGroupId(whatsappConfig.groupId || DEFAULT_GROUP_ID);
+    }
+  }, [whatsappConfig]);
 
   // --- Live Session States ---
   const [isSessionActive, setIsSessionActive] = useState<boolean>(() => {
@@ -231,7 +247,7 @@ export default function App() {
         }
       }
     }, (error) => {
-      console.error("Firestore current session sync error: ", error);
+      handleFirestoreError(error, OperationType.GET, 'sessions/current');
     });
 
     // 2. Listen to historic logged results from Firestore
@@ -246,12 +262,29 @@ export default function App() {
         setSessionHistory(items);
       }
     }, (error) => {
-      console.error("Firestore history collection sync error: ", error);
+      handleFirestoreError(error, OperationType.LIST, 'history');
+    });
+
+    // 3. Listen to centralized WhatsApp configurations from Firestore (real-time cloud lock)
+    const configDocRef = doc(db, 'settings', 'whatsapp');
+    const unsubscribeConfig = onSnapshot(configDocRef, (snapshot) => {
+      if (snapshot.exists()) {
+        const data = snapshot.data();
+        setWhatsappConfig({
+          webhookUrl: data.webhookUrl || DEFAULT_WEBHOOK_URL,
+          token: data.token || DEFAULT_TOKEN,
+          groupId: data.groupId || DEFAULT_GROUP_ID,
+          enabled: data.enabled !== undefined ? data.enabled : true
+        });
+      }
+    }, (error) => {
+      handleFirestoreError(error, OperationType.GET, 'settings/whatsapp');
     });
 
     return () => {
       unsubscribeSession();
       unsubscribeHistory();
+      unsubscribeConfig();
     };
   }, []);
 
@@ -849,6 +882,70 @@ export default function App() {
     playSoundAlert('CLICK');
     const msg = `⚡ [PING INSTANT TEST] Gerbang Notifikasi WhatsApp Terminal CY Batubara berfungsi normal. Status: ONLINE. Timestamp: ${new Date().toLocaleTimeString('id-ID')}`;
     await triggerWhatsAppWebhook('TEST', msg);
+  };
+
+  // Save WhatsApp settings directly to Cloud Database (Firestore) so it is locked persistently
+  const saveConfigToFirestore = async () => {
+    if (!inputWebhookUrl.trim() || !inputToken.trim() || !inputGroupId.trim()) {
+      alert("Format Error: Webhook URL, Authorization Token, dan WhatsApp Group ID wajib dilengkapi!");
+      return;
+    }
+    
+    setIsConfigSaving(true);
+    setConfigSaveSuccess(false);
+    playSoundAlert('CLICK');
+    
+    try {
+      const configDocRef = doc(db, 'settings', 'whatsapp');
+      const updatedConfig = {
+        webhookUrl: inputWebhookUrl.trim(),
+        token: inputToken.trim(),
+        groupId: inputGroupId.trim(),
+        enabled: true
+      };
+      
+      await setDoc(configDocRef, updatedConfig);
+      
+      // Update state instantly
+      setWhatsappConfig(updatedConfig);
+      
+      setConfigSaveSuccess(true);
+      setTimeout(() => setConfigSaveSuccess(false), 4000);
+    } catch (error) {
+      console.error("Gagal melakukan pencatatan di Firestore: ", error);
+      alert("Gagal mengunci konfigurasi WhatsApp ke Cloud Database. Periksa sambungan jaringan / konfigurasi Anda.");
+      handleFirestoreError(error, OperationType.WRITE, 'settings/whatsapp');
+    } finally {
+      setIsConfigSaving(false);
+    }
+  };
+
+  // Reset central settings back to baseline template defaults in Firestore
+  const resetConfigInFirestore = async () => {
+    if (window.confirm("Apakah Anda yakin ingin menyetel ulang konfigurasi API WhatsApp ke pengaturan default? Data yang terkunci di cloud database akan dihapus.")) {
+      setIsConfigSaving(true);
+      playSoundAlert('CLICK');
+      try {
+        const configDocRef = doc(db, 'settings', 'whatsapp');
+        const defaultDoc = {
+          webhookUrl: DEFAULT_WEBHOOK_URL,
+          token: DEFAULT_TOKEN,
+          groupId: DEFAULT_GROUP_ID,
+          enabled: true
+        };
+        await setDoc(configDocRef, defaultDoc);
+        setWhatsappConfig(defaultDoc);
+        
+        setConfigSaveSuccess(true);
+        setTimeout(() => setConfigSaveSuccess(false), 3000);
+      } catch (error) {
+        console.error("Error resetting WhatsApp config in Firestore: ", error);
+        alert("Gagal menyetel ulang konfigurasi di Cloud Database.");
+        handleFirestoreError(error, OperationType.WRITE, 'settings/whatsapp');
+      } finally {
+        setIsConfigSaving(false);
+      }
+    }
   };
 
   // Clear system history log state
@@ -1477,62 +1574,87 @@ export default function App() {
                 </button>
 
                 {showConfigPanel && (
-                  <div className="p-3.5 bg-slate-950 rounded border border-indigo-500/20 space-y-3 animate-fadeIn">
+                  <div className="p-3.5 bg-slate-950 rounded border border-indigo-500/25 space-y-3.5 animate-fadeIn">
                     <div>
-                      <label className="block text-[10px] font-mono text-slate-400 uppercase mb-1">Webhook Endpoint URL</label>
+                      <div className="flex justify-between items-center mb-1">
+                        <label className="block text-[10px] font-mono text-slate-400 uppercase">Webhook Endpoint URL</label>
+                        <span className="text-[9px] text-indigo-400 font-mono flex items-center gap-0.5">
+                          <Lock className="h-2.5 w-2.5" /> Terkunci
+                        </span>
+                      </div>
                       <input 
                         type="text" 
                         className="w-full bg-slate-900 border border-slate-800 rounded p-2 text-xs font-mono text-slate-200 focus:outline-none focus:border-indigo-500"
-                        value={whatsappConfig.webhookUrl}
-                        onChange={(e) => setWhatsappConfig({...whatsappConfig, webhookUrl: e.target.value})}
+                        value={inputWebhookUrl}
+                        onChange={(e) => setInputWebhookUrl(e.target.value)}
                         placeholder="https://api.yourgateway.com/send"
                       />
                     </div>
-
+ 
                     <div>
                       <label className="block text-[10px] font-mono text-slate-400 uppercase mb-1">Authorization Token</label>
                       <input 
                         type="password" 
                         className="w-full bg-slate-900 border border-slate-800 rounded p-2 text-xs font-mono text-slate-200 focus:outline-none focus:border-indigo-500"
-                        value={whatsappConfig.token}
-                        onChange={(e) => setWhatsappConfig({...whatsappConfig, token: e.target.value})}
+                        value={inputToken}
+                        onChange={(e) => setInputToken(e.target.value)}
                         placeholder="API_TOKEN_XYZ"
                       />
                       <span className="text-[9px] text-slate-500 font-light leading-none mt-0.5 block">Paste key/token gateway disini</span>
                     </div>
-
+ 
                     <div>
-                      <label className="block text-[10px] font-mono text-slate-400 uppercase mb-1">WhatsApp Group ID</label>
+                      <label className="block text-[10px] font-mono text-slate-400 uppercase mb-1">WhatsApp Group ID / Target</label>
                       <input 
                         type="text" 
                         className="w-full bg-slate-900 border border-slate-800 rounded p-2 text-xs font-mono text-slate-200 focus:outline-none focus:border-indigo-500"
-                        value={whatsappConfig.groupId}
-                        onChange={(e) => setWhatsappConfig({...whatsappConfig, groupId: e.target.value})}
+                        value={inputGroupId}
+                        onChange={(e) => setInputGroupId(e.target.value)}
                         placeholder="Group ID atau Nomor Tujuan"
                       />
                     </div>
 
-                    <div className="flex gap-2 pt-1">
+                    {configSaveSuccess && (
+                      <div className="p-2 bg-emerald-950/40 border border-emerald-550/20 text-emerald-400 text-[10px] rounded font-semibold text-center animate-pulse">
+                        ✓ Pengaturan baru disimpan & terkunci di Cloud!
+                      </div>
+                    )}
+ 
+                    <div className="space-y-2 pt-1 border-t border-slate-900">
                       <button
-                        onClick={executeTestAlert}
-                        className="flex-1 py-1.5 px-2 bg-indigo-600 hover:bg-indigo-500 text-white font-mono text-xs rounded transition-colors cursor-pointer"
+                        onClick={saveConfigToFirestore}
+                        disabled={isConfigSaving}
+                        className="w-full py-2 bg-indigo-600 hover:bg-indigo-500 disabled:bg-indigo-800 text-white font-mono text-xs rounded font-bold flex items-center justify-center gap-1.5 transition-colors cursor-pointer"
                       >
-                        Kirim Pesan Tes
+                        {isConfigSaving ? (
+                          <>
+                            <RefreshCw className="h-3.5 w-3.5 animate-spin" />
+                            <span>Menyimpan ke Cloud...</span>
+                          </>
+                        ) : (
+                          <>
+                            <Lock className="h-3.5 w-3.5" />
+                            <span>Simpan & Kunci di Cloud</span>
+                          </>
+                        )}
                       </button>
-                      <button
-                        onClick={() => {
-                          setWhatsappConfig({
-                            webhookUrl: DEFAULT_WEBHOOK_URL,
-                            token: DEFAULT_TOKEN,
-                            groupId: DEFAULT_GROUP_ID,
-                            enabled: true
-                          });
-                          playSoundAlert('CLICK');
-                        }}
-                        className="py-1.5 px-2.5 bg-slate-850 hover:bg-slate-800 text-slate-400 font-mono text-xs rounded transition-colors cursor-pointer"
-                      >
-                        Reset
-                      </button>
+
+                      <div className="flex gap-2">
+                        <button
+                          onClick={executeTestAlert}
+                          disabled={isConfigSaving}
+                          className="flex-1 py-1.5 px-2 bg-slate-900 hover:bg-slate-800 disabled:opacity-50 text-slate-300 font-mono text-xs rounded border border-slate-850 hover:border-slate-800 transition-colors cursor-pointer"
+                        >
+                          Kirim Pesan Tes
+                        </button>
+                        <button
+                          onClick={resetConfigInFirestore}
+                          disabled={isConfigSaving}
+                          className="py-1.5 px-2.5 bg-rose-950/25 hover:bg-rose-950/50 disabled:opacity-50 text-rose-400 font-mono text-xs rounded border border-rose-950/50 transition-colors cursor-pointer"
+                        >
+                          Reset Default
+                        </button>
+                      </div>
                     </div>
                   </div>
                 )}

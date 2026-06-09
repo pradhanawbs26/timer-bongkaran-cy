@@ -70,12 +70,36 @@
           "type": "string"
         }
       }
+    },
+    "WhatsAppConfig": {
+      "title": "WhatsAppConfig",
+      "description": "Centralized WhatsApp API integration settings",
+      "type": "object",
+      "properties": {
+        "webhookUrl": {
+          "type": "string"
+        },
+        "token": {
+          "type": "string"
+        },
+        "groupId": {
+          "type": "string"
+        },
+        "enabled": {
+          "type": "boolean"
+        }
+      },
+      "required": ["webhookUrl", "token", "groupId"]
     }
   },
   "firestore": {
     "sessions/current": {
       "schema": "SessionState",
       "description": "Stores the currently running unloading session state"
+    },
+    "settings/whatsapp": {
+      "schema": "WhatsAppConfig",
+      "description": "Central WhatsApp API gateway credentials and endpoint"
     },
     "history/{itemId}": {
       "schema": "HistoryItem",
