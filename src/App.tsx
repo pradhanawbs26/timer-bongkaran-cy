@@ -46,6 +46,15 @@ export default function App() {
     }
   }, [darkMode]);
 
+  // Set browser tab favicon dynamically to PT WBS logo
+  useEffect(() => {
+    const link: HTMLLinkElement = document.querySelector("link[rel*='icon']") || document.createElement("link");
+    link.type = "image/jpeg";
+    link.rel = "shortcut icon";
+    link.href = "https://res.cloudinary.com/dgjnlxf69/image/upload/v1781846868/3c323f2d-def8-4c64-92c4-ca9314d29572_qc0eqr.jpg";
+    document.getElementsByTagName("head")[0].appendChild(link);
+  }, []);
+
   // Menyimpan seluruh sesi aktif yang dideteksi dari database secara real-time
   const [runningSessions, setRunningSessions] = useState<{ id: string; train_number: string; status: string }[]>([]);
   const [loadingActiveLookup, setLoadingActiveLookup] = useState(true);
@@ -146,8 +155,13 @@ export default function App() {
       {/* HEADER UTAMA - BRIGHT GLOSSY GLASS STYLE */}
       <header className="bg-white/95 dark:bg-slate-900/95 backdrop-blur-md border-b border-slate-100 dark:border-slate-800 sticky top-0 z-40 px-3 sm:px-4 md:px-6 py-3 sm:py-4 flex items-center justify-between shadow-sm transition-colors duration-200">
         <div className="flex items-center gap-2 sm:gap-3">
-          <div className="w-9 h-9 sm:w-10 sm:h-10 bg-gradient-to-tr from-emerald-400 to-blue-500 rounded-xl sm:rounded-2xl flex items-center justify-center text-white font-black shadow-md shadow-emerald-500/10">
-            <Train size={18} className="stroke-[2.5]" />
+          <div className="w-9 h-9 sm:w-10 sm:h-10 rounded-xl sm:rounded-2xl overflow-hidden shadow-md flex items-center justify-center bg-white border border-slate-200/50 dark:border-slate-800">
+            <img 
+              src="https://res.cloudinary.com/dgjnlxf69/image/upload/v1781846868/3c323f2d-def8-4c64-92c4-ca9314d29572_qc0eqr.jpg" 
+              alt="PT Wahana Bara Sentosa Logo" 
+              className="w-full h-full object-cover"
+              referrerPolicy="no-referrer"
+            />
           </div>
           <div>
             <h1 className="text-sm sm:text-md md:text-lg font-black tracking-tight text-slate-900 dark:text-slate-100 flex items-center gap-1.5">
