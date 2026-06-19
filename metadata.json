@@ -1,6 +1,6 @@
 {
-  "name": "Coal Container Unloading Monitor",
-  "description": "Real-time monitoring and alert gateway for Coal Container Unloading Yards.",
+  "name": "Timer Bongkaran KA Batubara",
+  "description": "Aplikasi monitoring real-time waktu siklus bongkaran kontainer KA batubara dengan integrasi notifikasi Fonnte WhatsApp.",
   "requestFramePermissions": [],
   "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
 }
