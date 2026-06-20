@@ -14,6 +14,7 @@ export interface SessionFlags {
   notif_110m: boolean;
   notif_120m: boolean;
   notif_180m: boolean;
+  notif_completed?: boolean;
 }
 
 export interface UnloadingSession {

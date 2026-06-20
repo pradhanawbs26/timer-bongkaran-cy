@@ -174,14 +174,14 @@ async function runTimerSimulationEngine() {
 
   try {
     const sessionsRef = collection(db, "sessions");
-    const q = query(sessionsRef, where("status", "in", ["RUNNING", "PAUSED"]));
+    const q = query(sessionsRef, where("status", "in", ["RUNNING", "PAUSED", "COMPLETED"]));
     const querySnapshot = await getDocs(q);
 
     const nowSeconds = Math.floor(Date.now() / 1000);
 
     if (querySnapshot.empty) {
       if (nowSeconds % 30 < 5) {
-        console.log(`[Simulation Engine] Engine is active. 0 active/paused sessions currently found.`);
+        console.log(`[Simulation Engine] Engine is active. 0 active/paused/completed sessions currently found.`);
       }
       isRunningEngine = false;
       return;
@@ -193,6 +193,61 @@ async function runTimerSimulationEngine() {
       const session = document.data();
       const sessionId = document.id;
       const ref = doc(db, "sessions", sessionId);
+
+      // Jika status sesi sudah COMPLETED, periksa apakah notifikasi penyelesaian sudah terkirim atau belum
+      if (session.status === "COMPLETED") {
+        const flags = session.flags || {};
+        if (!flags.notif_completed && !activeSendingLocks.completed.has(sessionId)) {
+          activeSendingLocks.completed.add(sessionId);
+          
+          console.log(`[Simulation Engine] Sesi ${sessionId} terdeteksi COMPLETED tetapi belum mengirim notifikasi akhir. Mengirim sekarang...`);
+          
+          try {
+            await updateDoc(ref, {
+              "flags.notif_completed": true
+            });
+
+            const finalNetSec = session.net_duration_seconds || 0;
+            const finalGrossSec = session.gross_duration_seconds || 0;
+            const finalChecker = session.checker_name || "";
+            const finalGroupLeader = session.groupleader_name || "";
+            const finalTrainNo = formatTrainNumber(session.train_number || "");
+            const finalLogs = session.logs || [];
+
+            const totalDelaySeconds = finalGrossSec - finalNetSec;
+            const totalDelayMinutes = Math.max(0, Math.floor(totalDelaySeconds / 60));
+            const netMinutes = Math.floor(finalNetSec / 60);
+            const grossMinutes = Math.floor(finalGrossSec / 60);
+
+            interface DelayBreakdown { [key: string]: number }
+            const breakdown: DelayBreakdown = {};
+            
+            for (let i = 0; i < finalLogs.length; i++) {
+               if (finalLogs[i].type === "PAUSE" && finalLogs[i].reason) {
+                  const reason = finalLogs[i].reason;
+                  const resumeLog = finalLogs.slice(i).find((l: any) => l.type === "RESUME");
+                  const duration = resumeLog?.duration_seconds || 0;
+                  const minutes = Math.floor(duration / 60);
+                  breakdown[reason] = (breakdown[reason] || 0) + minutes;
+               }
+            }
+
+            const detailStrings = Object.entries(breakdown).map(([reason, minutes]) => `${reason} (${minutes} mnt)`);
+            const delayDetails = detailStrings.length > 0 ? detailStrings.join(", ") : "Tidak Ada Delay";
+
+            const msg = `✅ *Bongkaran KA Selesai!*\n\nNomor KA: *${finalTrainNo}*\nSelesai Pada: ${new Date().toLocaleDateString("id-ID", { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' })} WIB\nTarget Waktu: *120 Menit*\n*Net Duration:* ${netMinutes} Menit\n*Gross Duration:* ${grossMinutes} Menit (Total Delay *${totalDelayMinutes} Menit*)\n\n*Rincian Delay:* ${delayDetails}\n\nChecker: *${finalChecker}*\nGroup Leader: *${finalGroupLeader}*`;
+
+            await sendFonnteMessage(msg);
+          } catch (err) {
+            console.error(`[Simulation Engine] Gagal memproses notifikasi selesai otomatis untuk ${sessionId}:`, err);
+          } finally {
+            setTimeout(() => {
+              activeSendingLocks.completed.delete(sessionId);
+            }, 30000);
+          }
+        }
+        continue;
+      }
 
       const startTimestamp = session.start_timestamp;
       const logs = session.logs || [];
