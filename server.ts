@@ -8,6 +8,7 @@ import {
   getFirestore, 
   collection, 
   getDocs, 
+  getDoc,
   query, 
   where, 
   doc, 
@@ -384,17 +385,26 @@ app.post("/api/sessions/:id/complete-notif", async (req, res) => {
     }
     activeSendingLocks.completed.add(id);
 
-    const snapshot = await getDocs(query(collection(db, "sessions"), where("session_id", "==", id)));
-    
-    if (snapshot.empty) {
-       activeSendingLocks.completed.delete(id);
-       return res.status(404).json({ error: "Sesi tidak ditemukan" });
+    // Ambil dokumen secara mandiri/langsung demi konsistensi maksimal
+    let session: any = null;
+    let ref = doc(db, "sessions", id);
+    let docSnap = await getDoc(ref);
+
+    if (docSnap.exists()) {
+      session = docSnap.data();
+    } else {
+      const snapshot = await getDocs(query(collection(db, "sessions"), where("session_id", "==", id)));
+      if (!snapshot.empty) {
+        docSnap = snapshot.docs[0];
+        session = docSnap.data();
+        ref = doc(db, "sessions", docSnap.id);
+      }
     }
-    
-    const docSnap = snapshot.docs[0];
-    const session = docSnap.data();
-    const docId = docSnap.id;
-    const ref = doc(db, "sessions", docId);
+
+    if (!session) {
+      activeSendingLocks.completed.delete(id);
+      return res.status(404).json({ error: "Sesi tidak ditemukan" });
+    }
     
     const flags = session.flags || {};
     if (flags.notif_completed) {
@@ -407,23 +417,30 @@ app.post("/api/sessions/:id/complete-notif", async (req, res) => {
       "flags.notif_completed": true
     });
     
+    // Gunakan request body sebagai fallback utama jika Firestore replikasi dari client belum tuntas saat trigger dipanggil
+    const finalNetSec = (req.body.net_duration_seconds !== undefined) ? req.body.net_duration_seconds : (session.net_duration_seconds || 0);
+    const finalGrossSec = (req.body.gross_duration_seconds !== undefined) ? req.body.gross_duration_seconds : (session.gross_duration_seconds || 0);
+    const finalChecker = req.body.checker_name || session.checker_name || "";
+    const finalGroupLeader = req.body.groupleader_name || session.groupleader_name || "";
+    const finalTrainNo = formatTrainNumber(req.body.train_number || session.train_number || "");
+    const finalLogs = req.body.logs || session.logs || [];
+
     // Kirim notifikasi ringkasan penyelesaian via Fonnte
-    const totalDelaySeconds = (session.gross_duration_seconds || 0) - (session.net_duration_seconds || 0);
-    const totalDelayMinutes = Math.floor(totalDelaySeconds / 60);
-    const netMinutes = Math.floor((session.net_duration_seconds || 0) / 60);
-    const grossMinutes = Math.floor((session.gross_duration_seconds || 0) / 60);
+    const totalDelaySeconds = finalGrossSec - finalNetSec;
+    const totalDelayMinutes = Math.max(0, Math.floor(totalDelaySeconds / 60));
+    const netMinutes = Math.floor(finalNetSec / 60);
+    const grossMinutes = Math.floor(finalGrossSec / 60);
 
     // Hitung rincian delay dari logs
     interface DelayBreakdown { [key: string]: number }
     const breakdown: DelayBreakdown = {};
-    const logs = session.logs || [];
     
     // Identifikasi rincian delay
-    for (let i = 0; i < logs.length; i++) {
-       if (logs[i].type === "PAUSE" && logs[i].reason) {
-          const reason = logs[i].reason;
+    for (let i = 0; i < finalLogs.length; i++) {
+       if (finalLogs[i].type === "PAUSE" && finalLogs[i].reason) {
+          const reason = finalLogs[i].reason;
           // Cari resume berikutnya untuk hitung durasi delay
-          const resumeLog = logs.slice(i).find((l: any) => l.type === "RESUME");
+          const resumeLog = finalLogs.slice(i).find((l: any) => l.type === "RESUME");
           const duration = resumeLog?.duration_seconds || 0;
           const minutes = Math.floor(duration / 60);
           breakdown[reason] = (breakdown[reason] || 0) + minutes;
@@ -433,8 +450,7 @@ app.post("/api/sessions/:id/complete-notif", async (req, res) => {
     const detailStrings = Object.entries(breakdown).map(([reason, minutes]) => `${reason} (${minutes} mnt)`);
     const delayDetails = detailStrings.length > 0 ? detailStrings.join(", ") : "Tidak Ada Delay";
 
-    const trainNo = formatTrainNumber(session.train_number);
-    const msg = `✅ *Bongkaran KA Selesai!*\n\nNomor KA: *${trainNo}*\nSelesai Pada: ${new Date().toLocaleDateString("id-ID", { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' })} WIB\nTarget Target: *120 Menit*\n*Net Duration:* ${netMinutes} Menit\n*Gross Duration:* ${grossMinutes} Menit (Total Delay *${totalDelayMinutes} Menit*)\n\n*Rincian Delay:* ${delayDetails}\n\nChecker: *${session.checker_name}*\nGroup Leader: *${session.groupleader_name}*`;
+    const msg = `✅ *Bongkaran KA Selesai!*\n\nNomor KA: *${finalTrainNo}*\nSelesai Pada: ${new Date().toLocaleDateString("id-ID", { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' })} WIB\nTarget Waktu: *120 Menit*\n*Net Duration:* ${netMinutes} Menit\n*Gross Duration:* ${grossMinutes} Menit (Total Delay *${totalDelayMinutes} Menit*)\n\n*Rincian Delay:* ${delayDetails}\n\nChecker: *${finalChecker}*\nGroup Leader: *${finalGroupLeader}*`;
 
     await sendFonnteMessage(msg);
     

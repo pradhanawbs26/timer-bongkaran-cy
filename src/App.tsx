@@ -51,7 +51,7 @@ export default function App() {
     const link: HTMLLinkElement = document.querySelector("link[rel*='icon']") || document.createElement("link");
     link.type = "image/jpeg";
     link.rel = "shortcut icon";
-    link.href = "https://res.cloudinary.com/dgjnlxf69/image/upload/v1781846868/3c323f2d-def8-4c64-92c4-ca9314d29572_qc0eqr.jpg";
+    link.href = "https://res.cloudinary.com/dgjnlxf69/image/upload/v1781916119/Logo_Timer_KA_tx23xl.jpg";
     document.getElementsByTagName("head")[0].appendChild(link);
   }, []);
 
@@ -157,7 +157,7 @@ export default function App() {
         <div className="flex items-center gap-2 sm:gap-3">
           <div className="w-9 h-9 sm:w-10 sm:h-10 rounded-xl sm:rounded-2xl overflow-hidden shadow-md flex items-center justify-center bg-white border border-slate-200/50 dark:border-slate-800">
             <img 
-              src="https://res.cloudinary.com/dgjnlxf69/image/upload/v1781846868/3c323f2d-def8-4c64-92c4-ca9314d29572_qc0eqr.jpg" 
+              src="https://res.cloudinary.com/dgjnlxf69/image/upload/v1781916119/Logo_Timer_KA_tx23xl.jpg" 
               alt="PT Wahana Bara Sentosa Logo" 
               className="w-full h-full object-cover"
               referrerPolicy="no-referrer"
@@ -166,9 +166,6 @@ export default function App() {
           <div>
             <h1 className="text-sm sm:text-md md:text-lg font-black tracking-tight text-slate-900 dark:text-slate-100 flex items-center gap-1.5">
               <span>TIMER BONGKARAN KA</span>
-              <span className="text-[8px] sm:text-[9px] font-black bg-blue-50 dark:bg-blue-950/60 text-blue-600 dark:text-blue-400 py-0.5 px-2 rounded-full border border-blue-100 dark:border-blue-900 shadow-sm whitespace-nowrap">
-                V2.0 PRO
-              </span>
             </h1>
             <p className="text-[9px] sm:text-[10px] text-slate-600 dark:text-slate-400 font-bold tracking-wide line-clamp-1">
               Monitoring & Pencatatan Waktu Bongkaran KA PT WBS

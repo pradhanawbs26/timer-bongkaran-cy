@@ -139,7 +139,17 @@ export function useBongkaranSession(sessionId: string | null) {
     // Jika mencapai target, beralih langsung dan kirim notifikasi selesai
     if (isNowCompleted) {
       fetch(`/api/sessions/${sessionId}/complete-notif`, {
-        method: "POST"
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          net_duration_seconds: updatePayload.net_duration_seconds,
+          gross_duration_seconds: updatePayload.gross_duration_seconds,
+          unloaded_containers: nextValue,
+          checker_name: session.checker_name,
+          groupleader_name: session.groupleader_name,
+          train_number: session.train_number,
+          logs: session.logs
+        })
       }).catch((err) => console.error("Gagal mengirim notif autoselesai:", err));
     }
   }, [session, sessionId]);

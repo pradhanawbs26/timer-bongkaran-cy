@@ -124,7 +124,17 @@ export default function UnloadingMonitor({
     try {
       await onFinish();
       await fetch(`/api/sessions/${session.session_id}/complete-notif`, {
-        method: "POST"
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          net_duration_seconds: liveNetSeconds,
+          gross_duration_seconds: liveGrossSeconds,
+          unloaded_containers: session.unloaded_containers,
+          checker_name: session.checker_name,
+          groupleader_name: session.groupleader_name,
+          train_number: session.train_number,
+          logs: session.logs
+        })
       });
     } catch (e) {
       console.error("Gagal menyelesaikan sesi:", e);
@@ -208,9 +218,6 @@ export default function UnloadingMonitor({
 
           {/* Teks didalam lingkaran */}
           <div className="absolute inset-x-0 inset-y-0 flex flex-col items-center justify-center text-center px-4">
-            <span className="text-[8px] sm:text-[9px] font-extrabold tracking-wider text-slate-500 dark:text-slate-450 uppercase">
-              {isOvertime ? "KETERLAMBATAN (OVERTIME)" : "SISA WAKTU UNTUK TARGET"}
-            </span>
             <h1 className={`text-2xl sm:text-4xl font-extrabold tracking-tight my-1 sm:my-1.5 ${textColors} font-mono flex items-baseline`}>
               {formatTime(remainingSeconds)}
             </h1>
@@ -218,6 +225,13 @@ export default function UnloadingMonitor({
               {statusText}
             </span>
           </div>
+        </div>
+
+        {/* Label indikator waktu di bawah lingkaran waktu */}
+        <div className="mt-2 text-center">
+          <span className="text-[10px] sm:text-xs font-black tracking-wider text-slate-500 dark:text-slate-400 uppercase">
+            {isOvertime ? "DURASI MELEBIHI TARGET" : "SISA WAKTU UNTUK TARGET"}
+          </span>
         </div>
 
         {/* TARGET CLOCK SCHEDULE PANELS (Informasi Jam Mulai, Selesai, Batas Akhir)  */}
