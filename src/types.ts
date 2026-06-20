@@ -11,6 +11,7 @@ export interface SessionFlags {
   notif_start: boolean;
   notif_60m: boolean;
   notif_100m: boolean;
+  notif_110m: boolean;
   notif_120m: boolean;
   notif_180m: boolean;
 }
@@ -29,6 +30,7 @@ export interface UnloadingSession {
   gross_duration_seconds: number; // Total durasi kotor (termasuk delay)
   flags: SessionFlags; // Idempotency flags untuk anti-spam WhatsApp
   last_overtime_notif: number | null; // Timestamp terakhir peringatan overtime dikirim (detik)
+  last_overtime_interval?: number | null; // Interval kelipatan 10-menit overtime murni terakhir yang sudah dikirim
   logs: DelayLog[]; // Histori catatan hambatan (pause/resume)
   created_at: number; // Epoch timestamp ketika dokumen dibuat
 }

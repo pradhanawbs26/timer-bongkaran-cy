@@ -286,10 +286,12 @@ export function useBongkaranSession(sessionId: string | null) {
         notif_start: false, // akan dipicu pertama kali oleh backend/frontend
         notif_60m: false,
         notif_100m: false,
+        notif_110m: false,
         notif_120m: false,
         notif_180m: false,
       },
       last_overtime_notif: null,
+      last_overtime_interval: 0,
       logs: [],
       created_at: nowSeconds,
     };

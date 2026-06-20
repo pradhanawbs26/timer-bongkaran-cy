@@ -154,11 +154,17 @@ async function runTimerSimulationEngine() {
     const q = query(sessionsRef, where("status", "==", "RUNNING"));
     const querySnapshot = await getDocs(q);
 
+    const nowSeconds = Math.floor(Date.now() / 1000);
+
     if (querySnapshot.empty) {
+      if (nowSeconds % 30 < 5) {
+        console.log(`[Simulation Engine] Engine is active. 0 RUNNING sessions currently found.`);
+      }
+      isRunningEngine = false;
       return;
     }
 
-    const nowSeconds = Math.floor(Date.now() / 1000);
+    console.log(`[Simulation Engine] Running. Found ${querySnapshot.size} active session(s).`);
 
     for (const document of querySnapshot.docs) {
       const session = document.data();
@@ -167,12 +173,16 @@ async function runTimerSimulationEngine() {
 
       const startTimestamp = session.start_timestamp;
       const logs = session.logs || [];
-      const flags = session.flags || {
+      
+      // Menggunakan dynamic fallback spread pattern agar kebal terhadap properti flags historikal yang belum terisi
+      const flags = {
         notif_start: false,
         notif_60m: false,
         notif_100m: false,
+        notif_110m: false,
         notif_120m: false,
-        notif_180m: false
+        notif_180m: false,
+        ...(session.flags || {})
       };
 
       const trainNo = formatTrainNumber(session.train_number);
@@ -191,6 +201,8 @@ async function runTimerSimulationEngine() {
       // 3. Durasi bersih (net)
       const elapsedNet = elapsedGross - totalPausedSeconds;
       const elapsedNetMinutes = Math.floor(elapsedNet / 60);
+
+      console.log(`[Simulation Engine] Session ${sessionId} (${trainNo}): Gross=${elapsedGross}s, Net=${elapsedNet}s (${elapsedNetMinutes} mins). Flags: start=${flags.notif_start}, 60m=${flags.notif_60m}, 100m=${flags.notif_100m}, 110m=${flags.notif_110m}, 120m=${flags.notif_120m}`);
 
       const updatePayload: any = {
         net_duration_seconds: elapsedNet,
@@ -260,13 +272,27 @@ async function runTimerSimulationEngine() {
         continue;
       }
 
+      // C2. Notifikasi 110 Menit (Warning 10 Menit Sebelum Batas Target 120 Menit)
+      if (elapsedNetMinutes >= 110 && !flags.notif_110m) {
+        const msg = `⚠️ *Peringatan 110 Menit (Sisa 10 Menit Target)!*\n\nBongkaran ${trainNo} mendekati batas target standar (Sisa 10 Menit).\nStatus Kontainer: *${session.unloaded_containers}/122* Terbongkar.\nHarap optimalkan kecepatan pembongkaran!`;
+        
+        await updateDoc(ref, {
+          ...updatePayload,
+          "flags.notif_110m": true
+        });
+        await sendFonnteMessage(msg);
+        continue;
+      }
+
       // D. Notifikasi 120 Menit (Critical Overtime)
       if (elapsedNetMinutes >= 120 && !flags.notif_120m) {
         const msg = `🚨 *CRITICAL! Waktu Target Melampaui 120 Menit!*\n\nBongkaran ${trainNo} melebihi batas standar (120 Menit).\nDurasi Bersih saat ini: *${elapsedNetMinutes} Menit*.\nKontainer Terbongkar: *${session.unloaded_containers}/122*.\nButuh eskalasi cepat di lapangan!`;
         
+        // Simpan last_overtime_notif: nowSeconds untuk mencegah alert ganda/spontan di loop berikutnya
         await updateDoc(ref, {
           ...updatePayload,
-          "flags.notif_120m": true
+          "flags.notif_120m": true,
+          "last_overtime_notif": nowSeconds
         });
         await sendFonnteMessage(msg);
         continue;
@@ -284,16 +310,20 @@ async function runTimerSimulationEngine() {
         continue;
       }
 
-      // F. Notifikasi Overtime Berkala Setiap 10 Menit (600 Detik)
+      // F. Notifikasi Overtime Berkala Setiap 10 Menit Terlewat dari Target 120 Menit (Net Duration)
       if (elapsedNetMinutes >= 120) {
-        const lastOvertimeNotif = session.last_overtime_notif; // detik
-        const secondsSinceLastNotif = lastOvertimeNotif ? (nowSeconds - lastOvertimeNotif) : null;
+        const excessMinutes = elapsedNetMinutes - 120;
+        const currentInterval = Math.floor(excessMinutes / 10); // 1 untuk 130m, 2 untuk 140m, dst.
+        const lastOvertimeInterval = (session.last_overtime_interval !== undefined && session.last_overtime_interval !== null) 
+          ? session.last_overtime_interval 
+          : 0;
 
-        if (lastOvertimeNotif === null || (secondsSinceLastNotif !== null && secondsSinceLastNotif >= 600)) {
-          const msg = `⚠️ *Eskalasi Overtime Berkala! (Keterlambatan)*\n\nBongkaran ${trainNo} telah berjalan *${elapsedNetMinutes} Menit* murni.\nStatus Kontainer: *${session.unloaded_containers}* Terbongkar, *${122 - session.unloaded_containers}* Sisa.\nGroup Leader: *${session.groupleader_name}*`;
+        if (currentInterval > lastOvertimeInterval) {
+          const msg = `⚠️ *Peringatan Overtime Berkala! Durasi Melebihi Target (+${currentInterval * 10} Menit)*\n\nBongkaran ${trainNo} telah melebihi target waktu standar.\nDurasi murni saat ini: *${elapsedNetMinutes} Menit* murni.\nStatus Kontainer: *${session.unloaded_containers}/122* Terbongkar.\nChecker: *${session.checker_name}*\nGroup Leader: *${session.groupleader_name}*`;
           
           await updateDoc(ref, {
             ...updatePayload,
+            "last_overtime_interval": currentInterval,
             "last_overtime_notif": nowSeconds
           });
           await sendFonnteMessage(msg);
