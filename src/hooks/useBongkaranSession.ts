@@ -97,6 +97,26 @@ export function useBongkaranSession(sessionId: string | null) {
     return () => clearInterval(interval);
   }, [session]);
 
+  // Pemicu periodik tick/ping ke backend untuk menjaga container tetap hangat
+  // serta mengevaluasi status notifikasi standar di sisi server secara akurat
+  useEffect(() => {
+    if (!sessionId || !session || (session.status !== "RUNNING" && session.status !== "PAUSED")) return;
+
+    const runBackendTick = () => {
+      fetch(`/api/sessions/${sessionId}/tick`, {
+        method: "POST"
+      }).catch((err) => console.error("Gagal mengirim tick ke backend:", err));
+    };
+
+    // Trigger pertama saat inisialisasi / perubahan status
+    runBackendTick();
+
+    // Jalankan setiap 12 detik untuk keandalan maksimal tanpa spamming berlebih
+    const tickInterval = setInterval(runBackendTick, 12000);
+
+    return () => clearInterval(tickInterval);
+  }, [sessionId, session?.status]);
+
   // Tambah jumlah kontainer (+)
   const incrementContainers = useCallback(async (amount: number = 1) => {
     if (!session || !sessionId) return;

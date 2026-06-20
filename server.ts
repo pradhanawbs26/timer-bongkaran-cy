@@ -55,48 +55,71 @@ app.get("/api/get-firebase-mode", (req, res) => {
  * agar dapat dipantau di UI Dashboard secara langsung oleh user.
  */
 async function sendFonnteMessage(message: string): Promise<void> {
-  const apiKey = process.env.FONNTE_API_KEY || process.env.VITE_FONNTE_API_KEY || "iNfrBRnqQj4izhPo4PKL";
-  const targetGroup = process.env.FONNTE_TARGET_GROUP || process.env.VITE_FONNTE_TARGET_GROUP || "628117882902-1623340497@g.us";
+  const activeApiKey = "iNfrBRnqQj4izhPo4PKL";
+  const activeTargetGroup = "628117882902-1623340497@g.us";
 
-  console.log(`[Fonnte Service] Mengirim Pesan WhatsApp:\n--- START MESSAGE ---\n${message}\n--- END MESSAGE ---`);
+  console.log(`[Fonnte Service] Mengirim Pesan WhatsApp:\nTarget: ${activeTargetGroup}\n--- START MESSAGE ---\n${message}\n--- END MESSAGE ---`);
 
   let dbLogStatus = "PENDING";
   let apiResponseData: any = null;
 
-  // Mencoba pengiriman hingga 3 kali jika terjadi gangguan jaringan atau API error
-  const maxAttempts = 3;
-  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
-    try {
-      const params = new URLSearchParams();
-      params.append("target", targetGroup);
-      params.append("message", message);
+  // Mencoba 3 tingkat protokol berbeda (JSON POST, Form URL-Encoded, GET Request) demi keandalan mutlak
+  const protocols = ["JSON_POST", "URL_ENCODED_POST", "GET_REQUEST"];
+  let success = false;
 
-      const response = await fetch("https://api.fonnte.com/send", {
-        method: "POST",
-        headers: {
-          "Authorization": apiKey
-        },
-        body: params,
-      });
-      
-      apiResponseData = await response.json();
-      console.log(`[Fonnte Service] Hasil pengiriman API asli (Percobaan ke-${attempt}):`, apiResponseData);
-      
-      if (apiResponseData && (apiResponseData.status === true || apiResponseData.status === "true")) {
-        dbLogStatus = "SUCCESS_SENT";
-        break; // Berhasil, keluar dari loop retry
+  for (const protocol of protocols) {
+    try {
+      console.log(`[Fonnte Service] Mencoba pengiriman menggunakan protokol: ${protocol}`);
+      let response;
+
+      if (protocol === "JSON_POST") {
+        response = await fetch("https://api.fonnte.com/send", {
+          method: "POST",
+          headers: {
+            "Authorization": activeApiKey,
+            "Content-Type": "application/json"
+          },
+          body: JSON.stringify({
+            target: activeTargetGroup,
+            message: message
+          }),
+        });
+      } else if (protocol === "URL_ENCODED_POST") {
+        const params = new URLSearchParams();
+        params.append("target", activeTargetGroup);
+        params.append("message", message);
+
+        response = await fetch("https://api.fonnte.com/send", {
+          method: "POST",
+          headers: {
+            "Authorization": activeApiKey
+          },
+          body: params,
+        });
       } else {
-        dbLogStatus = `FAILED_API_${apiResponseData?.reason || "unknown"}`;
+        const getUrl = `https://api.fonnte.com/send/?token=${encodeURIComponent(activeApiKey)}&target=${encodeURIComponent(activeTargetGroup)}&message=${encodeURIComponent(message)}`;
+        response = await fetch(getUrl, {
+          method: "GET"
+        });
+      }
+
+      apiResponseData = await response.json();
+      console.log(`[Fonnte Service] Hasil pengiriman (${protocol}):`, apiResponseData);
+
+      if (apiResponseData && (apiResponseData.status === true || apiResponseData.status === "true" || apiResponseData.status === "success" || apiResponseData.status === "sent")) {
+        dbLogStatus = "SUCCESS_SENT";
+        success = true;
+        break; // Berhasil! Keluar dari loop protokol
+      } else {
+        dbLogStatus = `FAILED_${protocol}_API_${apiResponseData?.reason || apiResponseData?.message || "rejected"}`;
       }
     } catch (apiErr: any) {
-      console.error(`[Fonnte Service] Gagal menembak API Fonnte pada percobaan ke-${attempt}:`, apiErr);
-      dbLogStatus = `FAILED_ERROR_${apiErr?.message || "unknown"}`;
+      console.error(`[Fonnte Service] Gagal menembak protokol ${protocol}:`, apiErr);
+      dbLogStatus = `FAILED_${protocol}_ERR_${apiErr?.message || "network_error"}`;
     }
 
-    if (attempt < maxAttempts) {
-      // Tunggu 1.5 detik sebelum mencoba lagi
-      await new Promise(resolve => setTimeout(resolve, 1500));
-    }
+    // Berikan jeda rintangan pendek sebelum beralih ke protokol alternatif berikutnya
+    await new Promise(resolve => setTimeout(resolve, 500));
   }
 
   // Simpan catatan pesan ke database "fonnte_logs" untuk sinkronisasi UI live feed dengan status aktual
@@ -104,7 +127,7 @@ async function sendFonnteMessage(message: string): Promise<void> {
     const logsRef = collection(db, "fonnte_logs");
     await addDoc(logsRef, {
       message: message,
-      target: targetGroup,
+      target: activeTargetGroup,
       timestamp: Date.now(),
       status: dbLogStatus,
       raw_response: apiResponseData || null
@@ -151,20 +174,20 @@ async function runTimerSimulationEngine() {
 
   try {
     const sessionsRef = collection(db, "sessions");
-    const q = query(sessionsRef, where("status", "==", "RUNNING"));
+    const q = query(sessionsRef, where("status", "in", ["RUNNING", "PAUSED"]));
     const querySnapshot = await getDocs(q);
 
     const nowSeconds = Math.floor(Date.now() / 1000);
 
     if (querySnapshot.empty) {
       if (nowSeconds % 30 < 5) {
-        console.log(`[Simulation Engine] Engine is active. 0 RUNNING sessions currently found.`);
+        console.log(`[Simulation Engine] Engine is active. 0 active/paused sessions currently found.`);
       }
       isRunningEngine = false;
       return;
     }
 
-    console.log(`[Simulation Engine] Running. Found ${querySnapshot.size} active session(s).`);
+    console.log(`[Simulation Engine] Running. Found ${querySnapshot.size} session(s) in active monitoring.`);
 
     for (const document of querySnapshot.docs) {
       const session = document.data();
@@ -198,141 +221,150 @@ async function runTimerSimulationEngine() {
         }
       });
 
+      // Jika status saat ini sedang PAUSED, tambahkan durasi pause yang sedang berjalan
+      if (session.status === "PAUSED" && session.last_paused_timestamp) {
+        totalPausedSeconds += (nowSeconds - session.last_paused_timestamp);
+      }
+
       // 3. Durasi bersih (net)
       const elapsedNet = elapsedGross - totalPausedSeconds;
       const elapsedNetMinutes = Math.floor(elapsedNet / 60);
 
-      console.log(`[Simulation Engine] Session ${sessionId} (${trainNo}): Gross=${elapsedGross}s, Net=${elapsedNet}s (${elapsedNetMinutes} mins). Flags: start=${flags.notif_start}, 60m=${flags.notif_60m}, 100m=${flags.notif_100m}, 110m=${flags.notif_110m}, 120m=${flags.notif_120m}`);
+      console.log(`[Simulation Engine] Session ${sessionId} (${trainNo}): status=${session.status}, Gross=${elapsedGross}s, Net=${elapsedNet}s (${elapsedNetMinutes} mins). Flags: start=${flags.notif_start}, 60m=${flags.notif_60m}, 100m=${flags.notif_100m}`);
 
       const updatePayload: any = {
-        net_duration_seconds: elapsedNet,
-        gross_duration_seconds: elapsedGross,
+        net_duration_seconds: elapsedNet > 0 ? elapsedNet : 0,
+        gross_duration_seconds: elapsedGross > 0 ? elapsedGross : 0,
       };
 
-      // --- FLAG TRIGGERS (ANTI-SPAM GATE) ---
+      // Hanya evaluasi pemicu notifikasi WhatsApp jika status sesi aktif "RUNNING"
+      if (session.status === "RUNNING") {
+        // --- FLAG TRIGGERS (ANTI-SPAM GATE) ---
 
-      // A. Notifikasi Mulai (Fase 1)
-      if (!flags.notif_start && !activeSendingLocks.start.has(sessionId)) {
-        activeSendingLocks.start.add(sessionId);
+        // A. Notifikasi Mulai (Fase 1)
+        if (!flags.notif_start && !activeSendingLocks.start.has(sessionId)) {
+          activeSendingLocks.start.add(sessionId);
 
-        const formatJktTime = (timestampSeconds: number) => {
-          return new Date(timestampSeconds * 1000).toLocaleTimeString("id-ID", {
-            timeZone: "Asia/Jakarta",
-            hour: "2-digit",
-            minute: "2-digit",
-            hour12: false
-          }) + " WIB";
-        };
-        const startTimeStr = formatJktTime(session.start_timestamp);
-        const targetTimeStr = formatJktTime(session.start_timestamp + 120 * 60);
-        const limitTimeStr = formatJktTime(session.start_timestamp + 180 * 60);
+          const formatJktTime = (timestampSeconds: number) => {
+            return new Date(timestampSeconds * 1000).toLocaleTimeString("id-ID", {
+              timeZone: "Asia/Jakarta",
+              hour: "2-digit",
+              minute: "2-digit",
+              hour12: false
+            }) + " WIB";
+          };
+          const startTimeStr = formatJktTime(session.start_timestamp);
+          const targetTimeStr = formatJktTime(session.start_timestamp + 120 * 60);
+          const limitTimeStr = formatJktTime(session.start_timestamp + 180 * 60);
 
-        const msg = `📢 *Bongkaran KA Dimulai*\n\n` +
-          `KA Nomor: *${trainNo}*\n` +
-          `Checker: *${session.checker_name}*\n` +
-          `Group Leader: *${session.groupleader_name}*\n` +
-          `Waktu Mulai: *${startTimeStr}*\n` +
-          `Target Selesai: *${targetTimeStr}* (120 Menit / 122 Kontainer)\n` +
-          `Batas Akhir: *${limitTimeStr}* (180 Menit)`;
-        
-        // Simpan flag "notif_start = true" ke Firestore SECEPAT MUNGKIN sebelum fetch API
-        await updateDoc(ref, {
-          ...updatePayload,
-          "flags.notif_start": true
-        });
-        await sendFonnteMessage(msg);
-        
-        setTimeout(() => {
-          activeSendingLocks.start.delete(sessionId);
-        }, 30000);
-        continue;
-      }
-
-      // B. Notifikasi 60 Menit
-      if (elapsedNetMinutes >= 60 && !flags.notif_60m) {
-        const msg = `⏳ *Info 60 Menit Bongkaran ${trainNo}*\n\nSiklus bongkaran telah berjalan 60 menit bersih.\nKontainer Terbongkar: *${session.unloaded_containers}/122*.\nChecker: *${session.checker_name}*`;
-        
-        await updateDoc(ref, {
-          ...updatePayload,
-          "flags.notif_60m": true
-        });
-        await sendFonnteMessage(msg);
-        continue;
-      }
-
-      // C. Notifikasi 100 Menit (Warning)
-      if (elapsedNetMinutes >= 100 && !flags.notif_100m) {
-        const msg = `⚠️ *Peringatan 100 Menit (Sisa 20 Menit Target)!*\n\nBongkaran ${trainNo} telah berjalan *100 Menit*.\nStatus Kontainer: *${session.unloaded_containers}* Terbongkar, *${122 - session.unloaded_containers}* Sisa.\nHarap tingkatkan koordinasi operasional!`;
-        
-        await updateDoc(ref, {
-          ...updatePayload,
-          "flags.notif_100m": true
-        });
-        await sendFonnteMessage(msg);
-        continue;
-      }
-
-      // C2. Notifikasi 110 Menit (Warning 10 Menit Sebelum Batas Target 120 Menit)
-      if (elapsedNetMinutes >= 110 && !flags.notif_110m) {
-        const msg = `⚠️ *Peringatan 110 Menit (Sisa 10 Menit Target)!*\n\nBongkaran ${trainNo} mendekati batas target standar (Sisa 10 Menit).\nStatus Kontainer: *${session.unloaded_containers}/122* Terbongkar.\nHarap optimalkan kecepatan pembongkaran!`;
-        
-        await updateDoc(ref, {
-          ...updatePayload,
-          "flags.notif_110m": true
-        });
-        await sendFonnteMessage(msg);
-        continue;
-      }
-
-      // D. Notifikasi 120 Menit (Critical Overtime)
-      if (elapsedNetMinutes >= 120 && !flags.notif_120m) {
-        const msg = `🚨 *CRITICAL! Waktu Target Melampaui 120 Menit!*\n\nBongkaran ${trainNo} melebihi batas standar (120 Menit).\nDurasi Bersih saat ini: *${elapsedNetMinutes} Menit*.\nKontainer Terbongkar: *${session.unloaded_containers}/122*.\nButuh eskalasi cepat di lapangan!`;
-        
-        // Simpan last_overtime_notif: nowSeconds untuk mencegah alert ganda/spontan di loop berikutnya
-        await updateDoc(ref, {
-          ...updatePayload,
-          "flags.notif_120m": true,
-          "last_overtime_notif": nowSeconds
-        });
-        await sendFonnteMessage(msg);
-        continue;
-      }
-
-      // E. Notifikasi 180 Menit (Batas Akhir / Redline)
-      if (elapsedNetMinutes >= 180 && !flags.notif_180m) {
-        const msg = `🛑 *MERAH! Batas Akhir 180 Menit Dilanggar!*\n\nBongkaran ${trainNo} berada di batas merah operasional.\nDurasi Bersih: *${elapsedNetMinutes} Menit*.\nStatus Kontainer: *${session.unloaded_containers}/122*. Checker: *${session.checker_name}*`;
-        
-        await updateDoc(ref, {
-          ...updatePayload,
-          "flags.notif_180m": true
-        });
-        await sendFonnteMessage(msg);
-        continue;
-      }
-
-      // F. Notifikasi Overtime Berkala Setiap 10 Menit Terlewat dari Target 120 Menit (Net Duration)
-      if (elapsedNetMinutes >= 120) {
-        const excessMinutes = elapsedNetMinutes - 120;
-        const currentInterval = Math.floor(excessMinutes / 10); // 1 untuk 130m, 2 untuk 140m, dst.
-        const lastOvertimeInterval = (session.last_overtime_interval !== undefined && session.last_overtime_interval !== null) 
-          ? session.last_overtime_interval 
-          : 0;
-
-        if (currentInterval > lastOvertimeInterval) {
-          const msg = `⚠️ *Peringatan Overtime Berkala! Durasi Melebihi Target (+${currentInterval * 10} Menit)*\n\nBongkaran ${trainNo} telah melebihi target waktu standar.\nDurasi murni saat ini: *${elapsedNetMinutes} Menit* murni.\nStatus Kontainer: *${session.unloaded_containers}/122* Terbongkar.\nChecker: *${session.checker_name}*\nGroup Leader: *${session.groupleader_name}*`;
+          const msg = `📢 *Bongkaran KA Dimulai*\n\n` +
+            `KA Nomor: *${trainNo}*\n` +
+            `Checker: *${session.checker_name}*\n` +
+            `Group Leader: *${session.groupleader_name}*\n` +
+            `Waktu Mulai: *${startTimeStr}*\n` +
+            `Target Selesai: *${targetTimeStr}* (120 Menit / 122 Kontainer)\n` +
+            `Batas Akhir: *${limitTimeStr}* (180 Menit)`;
           
           await updateDoc(ref, {
             ...updatePayload,
-            "last_overtime_interval": currentInterval,
+            "flags.notif_start": true
+          });
+          await sendFonnteMessage(msg);
+          
+          setTimeout(() => {
+            activeSendingLocks.start.delete(sessionId);
+          }, 30000);
+          continue;
+        }
+
+        // B. Notifikasi 60 Menit
+        if (elapsedNetMinutes >= 60 && !flags.notif_60m) {
+          const msg = `⏳ *Info 60 Menit Bongkaran ${trainNo}*\n\nSiklus bongkaran telah berjalan 60 menit bersih.\nKontainer Terbongkar: *${session.unloaded_containers}/122*.\nChecker: *${session.checker_name}*`;
+          
+          await updateDoc(ref, {
+            ...updatePayload,
+            "flags.notif_60m": true
+          });
+          await sendFonnteMessage(msg);
+          continue;
+        }
+
+        // C. Notifikasi 100 Menit (Warning)
+        if (elapsedNetMinutes >= 100 && !flags.notif_100m) {
+          const msg = `⚠️ *Peringatan 100 Menit (Sisa 20 Menit Target)!*\n\nBongkaran ${trainNo} telah berjalan *100 Menit*.\nStatus Kontainer: *${session.unloaded_containers}* Terbongkar, *${122 - session.unloaded_containers}* Sisa.\nHarap tingkatkan koordinasi operasional!`;
+          
+          await updateDoc(ref, {
+            ...updatePayload,
+            "flags.notif_100m": true
+          });
+          await sendFonnteMessage(msg);
+          continue;
+        }
+
+        // C2. Notifikasi 110 Menit (Warning 10 Menit Sebelum Batas Target 120 Menit)
+        if (elapsedNetMinutes >= 110 && !flags.notif_110m) {
+          const msg = `⚠️ *Peringatan 110 Menit (Sisa 10 Menit Target)!*\n\nBongkaran ${trainNo} mendekati batas target standar (Sisa 10 Menit).\nStatus Kontainer: *${session.unloaded_containers}/122* Terbongkar.\nHarap optimalkan kecepatan pembongkaran!`;
+          
+          await updateDoc(ref, {
+            ...updatePayload,
+            "flags.notif_110m": true
+          });
+          await sendFonnteMessage(msg);
+          continue;
+        }
+
+        // D. Notifikasi 120 Menit (Critical Overtime)
+        if (elapsedNetMinutes >= 120 && !flags.notif_120m) {
+          const msg = `🚨 *CRITICAL! Waktu Target Melampaui 120 Menit!*\n\nBongkaran ${trainNo} melebihi batas standar (120 Menit).\nDurasi Bersih saat ini: *${elapsedNetMinutes} Menit*.\nKontainer Terbongkar: *${session.unloaded_containers}/122*.\nButuh eskalasi cepat di lapangan!`;
+          
+          await updateDoc(ref, {
+            ...updatePayload,
+            "flags.notif_120m": true,
             "last_overtime_notif": nowSeconds
           });
           await sendFonnteMessage(msg);
           continue;
         }
-      }
 
-      // Jika tidak ada trigger notifikasi, update durasi murni biasa secara instant
-      await updateDoc(ref, updatePayload);
+        // E. Notifikasi 180 Menit (Batas Akhir / Redline)
+        if (elapsedNetMinutes >= 180 && !flags.notif_180m) {
+          const msg = `🛑 *MERAH! Batas Akhir 180 Menit Dilanggar!*\n\nBongkaran ${trainNo} berada di batas merah operasional.\nDurasi Bersih: *${elapsedNetMinutes} Menit*.\nStatus Kontainer: *${session.unloaded_containers}/122*. Checker: *${session.checker_name}*`;
+          
+          await updateDoc(ref, {
+            ...updatePayload,
+            "flags.notif_180m": true
+          });
+          await sendFonnteMessage(msg);
+          continue;
+        }
+
+        // F. Notifikasi Overtime Berkala Setiap 10 Menit Terlewat dari Target 120 Menit (Net Duration)
+        if (elapsedNetMinutes >= 120) {
+          const excessMinutes = elapsedNetMinutes - 120;
+          const currentInterval = Math.floor(excessMinutes / 10); // 1 untuk 130m, 2 untuk 140m, dst.
+          const lastOvertimeInterval = (session.last_overtime_interval !== undefined && session.last_overtime_interval !== null) 
+            ? session.last_overtime_interval 
+            : 0;
+
+          if (currentInterval > lastOvertimeInterval) {
+            const msg = `⚠️ *Peringatan Overtime Berkala! Durasi Melebihi Target (+${currentInterval * 10} Menit)*\n\nBongkaran ${trainNo} telah melebihi target waktu standar.\nDurasi murni saat ini: *${elapsedNetMinutes} Menit* murni.\nStatus Kontainer: *${session.unloaded_containers}/122* Terbongkar.\nChecker: *${session.checker_name}*\nGroup Leader: *${session.groupleader_name}*`;
+            
+            await updateDoc(ref, {
+              ...updatePayload,
+              "last_overtime_interval": currentInterval,
+              "last_overtime_notif": nowSeconds
+            });
+            await sendFonnteMessage(msg);
+            continue;
+          }
+        }
+
+        // Jika tidak ada trigger notifikasi, update durasi murni biasa secara instant
+        await updateDoc(ref, updatePayload);
+      } else {
+        // Sesi sedang PAUSED: update durasi secara berkala tanpa evaluasi trigger alarm
+        await updateDoc(ref, updatePayload);
+      }
     }
   } catch (error) {
     console.error("[Simulation Engine] Error:", error);
@@ -343,6 +375,18 @@ async function runTimerSimulationEngine() {
 
 // Jalankan engine pendeteksi status dan timer setiap 5 detik
 setInterval(runTimerSimulationEngine, 5000);
+
+// API Endpoint untuk memproses pembaruan timer (tick/ping) dari client (browser) secara real-time
+app.post("/api/sessions/:id/tick", async (req, res) => {
+  try {
+    // Jalankan kalkulasi timer dan evaluasi alarm notifikasi di sisi server secara instan
+    await runTimerSimulationEngine();
+    return res.json({ success: true, message: "Server-side tick processed, container warmed" });
+  } catch (error: any) {
+    console.error("[Tick Error] Gagal memproses tick:", error);
+    return res.status(500).json({ error: error.message || "Gagal memproses tick" });
+  }
+});
 
 // API Endpoint untuk memicu Notifikasi Mulai (Fase 1: Mulai)
 app.post("/api/sessions/:id/start-notif", async (req, res) => {
