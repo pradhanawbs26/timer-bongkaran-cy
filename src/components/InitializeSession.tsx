@@ -103,7 +103,12 @@ export default function InitializeSession({ onStart }: InitializeSessionProps) {
         groupLeaderName.trim()
       );
 
-      if (!success) {
+      if (success) {
+        // Pemicu langsung WhatsApp status mulai secara instant dan real-time
+        fetch(`/api/sessions/${generatedSessionId}/start-notif`, {
+          method: "POST"
+        }).catch((err) => console.error("Gagal mengirim notif mulai:", err));
+      } else {
         setErrorMessage("Gagal menginisialisasi sesi di cloud database.");
       }
     } catch (err: any) {

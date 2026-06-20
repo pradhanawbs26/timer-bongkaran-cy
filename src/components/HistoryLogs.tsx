@@ -42,7 +42,7 @@ export default function HistoryLogs() {
           </div>
           <div>
             <h3 className="font-black text-slate-900 dark:text-slate-100">Log Histori Bongkaran KA</h3>
-            <p className="text-xs text-slate-500 dark:text-slate-400 font-semibold mt-0.5">Rekapitulasi performa & log keterlambatan KA</p>
+            <p className="text-xs text-slate-500 dark:text-slate-400 font-semibold mt-0.5">Catatan pencapaian bongkaran KA</p>
           </div>
         </div>
         
@@ -108,9 +108,17 @@ export default function HistoryLogs() {
                       <span>Rangkaian {sess.train_number}</span>
                     </h4>
                   </div>
-                  <div className="text-left sm:text-right">
-                    <p className="text-[10px] text-slate-500 dark:text-slate-400 uppercase font-black tracking-wider">TGL MULAI</p>
-                    <p className="text-xs text-slate-700 dark:text-slate-300 font-extrabold mt-0.5">{new Date(sess.start_timestamp * 1000).toLocaleString("id-ID", { hour12: false })}</p>
+                  <div className="text-left sm:text-right space-y-1">
+                    <div>
+                      <span className="text-[10px] text-slate-500 dark:text-slate-400 uppercase font-black tracking-wider block">WAKTU MULAI</span>
+                      <span className="text-xs text-slate-700 dark:text-slate-305 font-extrabold">{new Date(sess.start_timestamp * 1000).toLocaleString("id-ID", { hour12: false })}</span>
+                    </div>
+                    {sess.status === "COMPLETED" && (
+                      <div>
+                        <span className="text-[10px] text-indigo-600 dark:text-indigo-400 uppercase font-black tracking-wider block">WAKTU SELESAI</span>
+                        <span className="text-xs text-slate-700 dark:text-slate-305 font-extrabold">{new Date((sess.start_timestamp + sess.gross_duration_seconds) * 1000).toLocaleString("id-ID", { hour12: false })}</span>
+                      </div>
+                    )}
                   </div>
                 </div>
 

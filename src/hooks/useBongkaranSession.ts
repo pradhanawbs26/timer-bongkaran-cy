@@ -135,6 +135,13 @@ export function useBongkaranSession(sessionId: string | null) {
     }
 
     await updateDoc(docRef, updatePayload);
+
+    // Jika mencapai target, beralih langsung dan kirim notifikasi selesai
+    if (isNowCompleted) {
+      fetch(`/api/sessions/${sessionId}/complete-notif`, {
+        method: "POST"
+      }).catch((err) => console.error("Gagal mengirim notif autoselesai:", err));
+    }
   }, [session, sessionId]);
 
   // Kurang jumlah kontainer (-)

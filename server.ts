@@ -54,39 +54,48 @@ app.get("/api/get-firebase-mode", (req, res) => {
  * agar dapat dipantau di UI Dashboard secara langsung oleh user.
  */
 async function sendFonnteMessage(message: string): Promise<void> {
-  const apiKey = process.env.VITE_FONNTE_API_KEY || "iNfrBRnqQj4izhPo4PKL";
-  const targetGroup = process.env.VITE_FONNTE_TARGET_GROUP || "628117882902-1623340497@g.us";
+  const apiKey = process.env.FONNTE_API_KEY || process.env.VITE_FONNTE_API_KEY || "iNfrBRnqQj4izhPo4PKL";
+  const targetGroup = process.env.FONNTE_TARGET_GROUP || process.env.VITE_FONNTE_TARGET_GROUP || "628117882902-1623340497@g.us";
 
   console.log(`[Fonnte Service] Mengirim Pesan WhatsApp:\n--- START MESSAGE ---\n${message}\n--- END MESSAGE ---`);
 
   let dbLogStatus = "PENDING";
   let apiResponseData: any = null;
 
-  try {
-    // Fonnte API membutuhkan payload dalam form-urlencoded (URLSearchParams) atau multipart/form-data
-    const params = new URLSearchParams();
-    params.append("target", targetGroup);
-    params.append("message", message);
+  // Mencoba pengiriman hingga 3 kali jika terjadi gangguan jaringan atau API error
+  const maxAttempts = 3;
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    try {
+      const params = new URLSearchParams();
+      params.append("target", targetGroup);
+      params.append("message", message);
 
-    const response = await fetch("https://api.fonnte.com/send", {
-      method: "POST",
-      headers: {
-        "Authorization": apiKey
-      },
-      body: params,
-    });
-    
-    apiResponseData = await response.json();
-    console.log("[Fonnte Service] Hasil pengiriman API asli:", apiResponseData);
-    
-    if (apiResponseData && (apiResponseData.status === true || apiResponseData.status === "true")) {
-      dbLogStatus = "SUCCESS_SENT";
-    } else {
-      dbLogStatus = `FAILED_API_${apiResponseData?.reason || "unknown"}`;
+      const response = await fetch("https://api.fonnte.com/send", {
+        method: "POST",
+        headers: {
+          "Authorization": apiKey
+        },
+        body: params,
+      });
+      
+      apiResponseData = await response.json();
+      console.log(`[Fonnte Service] Hasil pengiriman API asli (Percobaan ke-${attempt}):`, apiResponseData);
+      
+      if (apiResponseData && (apiResponseData.status === true || apiResponseData.status === "true")) {
+        dbLogStatus = "SUCCESS_SENT";
+        break; // Berhasil, keluar dari loop retry
+      } else {
+        dbLogStatus = `FAILED_API_${apiResponseData?.reason || "unknown"}`;
+      }
+    } catch (apiErr: any) {
+      console.error(`[Fonnte Service] Gagal menembak API Fonnte pada percobaan ke-${attempt}:`, apiErr);
+      dbLogStatus = `FAILED_ERROR_${apiErr?.message || "unknown"}`;
     }
-  } catch (apiErr: any) {
-    console.error("[Fonnte Service] Kegagalan API Fonnte asli:", apiErr);
-    dbLogStatus = `FAILED_ERROR_${apiErr?.message || "unknown"}`;
+
+    if (attempt < maxAttempts) {
+      // Tunggu 1.5 detik sebelum mencoba lagi
+      await new Promise(resolve => setTimeout(resolve, 1500));
+    }
   }
 
   // Simpan catatan pesan ke database "fonnte_logs" untuk sinkronisasi UI live feed dengan status aktual
@@ -116,6 +125,14 @@ function formatTrainNumber(no: string): string {
   cleaned = cleaned.replace(/^KA/gi, "");
   return `KA-${cleaned.trim()}`;
 }
+
+// Set pencatatan untuk menghindari pengiriman pesan WhatsApp ganda/balapan secara in-memory
+const activeSendingLocks = {
+  start: new Set<string>(),
+  completed: new Set<string>(),
+  pauses: new Set<string>(), // Menyimpan string kombinasi id dan alasan: `${id}-${reason}`
+  resumes: new Set<string>()   // Menyimpan string kombinasi id dan alasan: `${id}-${reason}`
+};
 
 let isRunningEngine = false;
 
@@ -182,7 +199,9 @@ async function runTimerSimulationEngine() {
       // --- FLAG TRIGGERS (ANTI-SPAM GATE) ---
 
       // A. Notifikasi Mulai (Fase 1)
-      if (!flags.notif_start) {
+      if (!flags.notif_start && !activeSendingLocks.start.has(sessionId)) {
+        activeSendingLocks.start.add(sessionId);
+
         const formatJktTime = (timestampSeconds: number) => {
           return new Date(timestampSeconds * 1000).toLocaleTimeString("id-ID", {
             timeZone: "Asia/Jakarta",
@@ -209,6 +228,10 @@ async function runTimerSimulationEngine() {
           "flags.notif_start": true
         });
         await sendFonnteMessage(msg);
+        
+        setTimeout(() => {
+          activeSendingLocks.start.delete(sessionId);
+        }, 30000);
         continue;
       }
 
@@ -290,24 +313,105 @@ async function runTimerSimulationEngine() {
 // Jalankan engine pendeteksi status dan timer setiap 5 detik
 setInterval(runTimerSimulationEngine, 5000);
 
+// API Endpoint untuk memicu Notifikasi Mulai (Fase 1: Mulai)
+app.post("/api/sessions/:id/start-notif", async (req, res) => {
+  const { id } = req.params;
+  try {
+    if (activeSendingLocks.start.has(id)) {
+      return res.json({ success: true, message: "Notifikasi mulai sedang diproses..." });
+    }
+    activeSendingLocks.start.add(id);
+
+    const snapshot = await getDocs(query(collection(db, "sessions"), where("session_id", "==", id)));
+    if (snapshot.empty) {
+      activeSendingLocks.start.delete(id);
+      return res.status(404).json({ error: "Sesi tidak ditemukan" });
+    }
+    const session = snapshot.docs[0].data();
+    const docId = snapshot.docs[0].id;
+    const ref = doc(db, "sessions", docId);
+
+    // Kirim jika flag notif belum diset
+    if (!session.flags?.notif_start) {
+      // Set flag di Firestore secepatnya
+      await updateDoc(ref, {
+        "flags.notif_start": true
+      });
+
+      const trainNo = formatTrainNumber(session.train_number);
+      const formatJktTime = (timestampSeconds: number) => {
+        return new Date(timestampSeconds * 1000).toLocaleTimeString("id-ID", {
+          timeZone: "Asia/Jakarta",
+          hour: "2-digit",
+          minute: "2-digit",
+          hour12: false
+        }) + " WIB";
+      };
+      
+      const startTimeStr = formatJktTime(session.start_timestamp);
+      const targetTimeStr = formatJktTime(session.start_timestamp + 120 * 60);
+      const limitTimeStr = formatJktTime(session.start_timestamp + 180 * 60);
+
+      const msg = `📢 *Bongkaran KA Dimulai*\n\n` +
+        `KA Nomor: *${trainNo}*\n` +
+        `Checker: *${session.checker_name}*\n` +
+        `Group Leader: *${session.groupleader_name}*\n` +
+        `Waktu Mulai: *${startTimeStr}*\n` +
+        `Target Selesai: *${targetTimeStr}* (120 Menit / 122 Kontainer)\n` +
+        `Batas Akhir: *${limitTimeStr}* (180 Menit)`;
+
+      await sendFonnteMessage(msg);
+    }
+    
+    // Tahan kunci selama 30 detik untuk mengendapkan balapan ganda
+    setTimeout(() => {
+      activeSendingLocks.start.delete(id);
+    }, 30000);
+
+    res.json({ success: true, message: "Notifikasi mulai terkirim!" });
+  } catch (error: any) {
+    activeSendingLocks.start.delete(id);
+    res.status(500).json({ error: error.message });
+  }
+});
+
 // API Endpoint untuk memicu Notifikasi Akhir (Fase 4: Selesai)
 app.post("/api/sessions/:id/complete-notif", async (req, res) => {
   const { id } = req.params;
   try {
-    const sessionRef = doc(db, "sessions", id);
+    if (activeSendingLocks.completed.has(id)) {
+      return res.json({ success: true, message: "Notifikasi penyelesaian sedang diproses..." });
+    }
+    activeSendingLocks.completed.add(id);
+
     const snapshot = await getDocs(query(collection(db, "sessions"), where("session_id", "==", id)));
     
     if (snapshot.empty) {
+       activeSendingLocks.completed.delete(id);
        return res.status(404).json({ error: "Sesi tidak ditemukan" });
     }
     
-    const session = snapshot.docs[0].data();
+    const docSnap = snapshot.docs[0];
+    const session = docSnap.data();
+    const docId = docSnap.id;
+    const ref = doc(db, "sessions", docId);
+    
+    const flags = session.flags || {};
+    if (flags.notif_completed) {
+      activeSendingLocks.completed.delete(id);
+      return res.json({ success: true, message: "Notifikasi penyelesaian sudah pernah dikirim sebelumnya." });
+    }
+
+    // Set flag ke Firestore secepatnya sebelum kita buat API call eksternal Fonnte
+    await updateDoc(ref, {
+      "flags.notif_completed": true
+    });
     
     // Kirim notifikasi ringkasan penyelesaian via Fonnte
-    const totalDelaySeconds = session.gross_duration_seconds - session.net_duration_seconds;
+    const totalDelaySeconds = (session.gross_duration_seconds || 0) - (session.net_duration_seconds || 0);
     const totalDelayMinutes = Math.floor(totalDelaySeconds / 60);
-    const netMinutes = Math.floor(session.net_duration_seconds / 60);
-    const grossMinutes = Math.floor(session.gross_duration_seconds / 60);
+    const netMinutes = Math.floor((session.net_duration_seconds || 0) / 60);
+    const grossMinutes = Math.floor((session.gross_duration_seconds || 0) / 60);
 
     // Hitung rincian delay dari logs
     interface DelayBreakdown { [key: string]: number }
@@ -333,8 +437,15 @@ app.post("/api/sessions/:id/complete-notif", async (req, res) => {
     const msg = `✅ *Bongkaran KA Selesai!*\n\nNomor KA: *${trainNo}*\nSelesai Pada: ${new Date().toLocaleDateString("id-ID", { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' })} WIB\nTarget Target: *120 Menit*\n*Net Duration:* ${netMinutes} Menit\n*Gross Duration:* ${grossMinutes} Menit (Total Delay *${totalDelayMinutes} Menit*)\n\n*Rincian Delay:* ${delayDetails}\n\nChecker: *${session.checker_name}*\nGroup Leader: *${session.groupleader_name}*`;
 
     await sendFonnteMessage(msg);
+    
+    // Tahan kunci selama 30 detik untuk meredam pemanggilan simultan dari browser
+    setTimeout(() => {
+      activeSendingLocks.completed.delete(id);
+    }, 30000);
+
     res.json({ success: true, message: "Notifikasi penyelesaian terkirim!" });
   } catch (error: any) {
+    activeSendingLocks.completed.delete(id);
     res.status(500).json({ error: error.message });
   }
 });
@@ -343,9 +454,17 @@ app.post("/api/sessions/:id/complete-notif", async (req, res) => {
 app.post("/api/sessions/:id/pause-notif", async (req, res) => {
   const { id } = req.params;
   const { reason } = req.body;
+  const lockKey = `${id}-${reason}`;
+
   try {
+    if (activeSendingLocks.pauses.has(lockKey)) {
+      return res.json({ success: true, message: "Notifikasi delay mulai untuk alasan ini sudah diproses." });
+    }
+    activeSendingLocks.pauses.add(lockKey);
+
     const snapshot = await getDocs(query(collection(db, "sessions"), where("session_id", "==", id)));
     if (snapshot.empty) {
+      activeSendingLocks.pauses.delete(lockKey);
       return res.status(404).json({ error: "Sesi tidak ditemukan" });
     }
     const session = snapshot.docs[0].data();
@@ -361,8 +480,15 @@ app.post("/api/sessions/:id/pause-notif", async (req, res) => {
     const msg = `⏳ *Delay Bongkaran ${trainNo} Dimulai*\n\nAlasan Delay: *${reason}*\nWaktu Mulai Delay: *${nowJkt}*\nJumlah Terbongkar: *${session.unloaded_containers}/122*\nChecker: *${session.checker_name}*`;
     
     await sendFonnteMessage(msg);
+
+    // Hapus dari lock setelah 20 detik untuk mengizinkan delay dengan alasan sama di lain waktu
+    setTimeout(() => {
+      activeSendingLocks.pauses.delete(lockKey);
+    }, 20000);
+
     res.json({ success: true });
   } catch (error: any) {
+    activeSendingLocks.pauses.delete(lockKey);
     res.status(500).json({ error: error.message });
   }
 });
@@ -371,9 +497,17 @@ app.post("/api/sessions/:id/pause-notif", async (req, res) => {
 app.post("/api/sessions/:id/resume-notif", async (req, res) => {
   const { id } = req.params;
   const { duration_seconds, reason } = req.body;
+  const lockKey = `${id}-${reason}`;
+
   try {
+    if (activeSendingLocks.resumes.has(lockKey)) {
+      return res.json({ success: true, message: "Notifikasi delay selesai untuk alasan ini sudah diproses." });
+    }
+    activeSendingLocks.resumes.add(lockKey);
+
     const snapshot = await getDocs(query(collection(db, "sessions"), where("session_id", "==", id)));
     if (snapshot.empty) {
+      activeSendingLocks.resumes.delete(lockKey);
       return res.status(404).json({ error: "Sesi tidak ditemukan" });
     }
     const session = snapshot.docs[0].data();
@@ -384,8 +518,15 @@ app.post("/api/sessions/:id/resume-notif", async (req, res) => {
     const msg = `▶️ *Bongkaran ${trainNo} Dilanjutkan*\n\nHambatan Selesai: *${reason || "Delay selesai"}*\nDurasi Hambatan: *${durationMinutes} Menit*\nJumlah Terbongkar: *${session.unloaded_containers}/122*\nChecker: *${session.checker_name}*`;
     
     await sendFonnteMessage(msg);
+
+    // Hapus dari lock setelah 20 detik
+    setTimeout(() => {
+      activeSendingLocks.resumes.delete(lockKey);
+    }, 20000);
+
     res.json({ success: true });
   } catch (error: any) {
+    activeSendingLocks.resumes.delete(lockKey);
     res.status(500).json({ error: error.message });
   }
 });
