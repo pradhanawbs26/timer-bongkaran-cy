@@ -1,12 +1,22 @@
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, useRef } from "react";
 import { doc, onSnapshot, updateDoc, setDoc, getDoc } from "firebase/firestore";
 import { db } from "../firebaseClient";
 import { UnloadingSession, SessionStatus, DelayLog } from "../types";
+import {
+  formatTrainNumber,
+  sendFonnteMessageClient,
+  triggerPauseNotificationClient,
+  triggerResumeNotificationClient,
+  triggerCompleteNotificationClient
+} from "../utils/whatsappNotification";
 
 export function useBongkaranSession(sessionId: string | null) {
   const [session, setSession] = useState<UnloadingSession | null>(null);
   const [loading, setLoading] = useState<boolean>(true);
   const [error, setError] = useState<string | null>(null);
+
+  // Lock untuk mencegah double-trigger di browser dalam rentang milidetik Firebase sync
+  const clientPushedFlagsRef = useRef<Record<string, boolean>>({});
 
   // Perhitungan dinamis durasi murni (net) dan kotor (gross)
   // Untuk memastikan kebal terhadap device sleep atau refresh browser.
@@ -92,6 +102,101 @@ export function useBongkaranSession(sessionId: string | null) {
 
       setLiveGrossSeconds(elapsedGross > 0 ? elapsedGross : 0);
       setLiveNetSeconds(elapsedNet > 0 ? elapsedNet : 0);
+
+      // --- LOGIKA EVALUASI ALARM/NOTIFIKASI CLIENT-SIDE ---
+      // Berguna jika server offline, dalam mode Serverless, atau dideploy di Vercel
+      if (session.status === "RUNNING") {
+        const elapsedNetMinutes = Math.floor(elapsedNet / 60);
+        const flags = session.flags || {
+          notif_start: false,
+          notif_60m: false,
+          notif_100m: false,
+          notif_110m: false,
+          notif_120m: false,
+          notif_180m: false,
+        };
+
+        const docRef = doc(db, "sessions", sessionId);
+
+        const triggerClientNotification = async (flagKey: string, messageText: string, additionalPayload: Record<string, any> = {}) => {
+          const lockKey = `${session.session_id}-${flagKey}`;
+          if (clientPushedFlagsRef.current[lockKey]) return;
+          clientPushedFlagsRef.current[lockKey] = true;
+
+          console.log(`[Client Evaluator] Memicu notifikasi alarm: ${flagKey}`);
+          try {
+            await updateDoc(docRef, {
+              [`flags.${flagKey}`]: true,
+              ...additionalPayload
+            });
+            await sendFonnteMessageClient(messageText);
+          } catch (err) {
+            console.error(`[Client Evaluator] Gagal mengirim alarm ${flagKey}:`, err);
+            clientPushedFlagsRef.current[lockKey] = false;
+          }
+        };
+
+        const trainNoStr = formatTrainNumber(session.train_number);
+
+        // A. Notifikasi 60 Menit
+        if (elapsedNetMinutes >= 60 && !flags.notif_60m) {
+          const msg = `⏳ *Info 60 Menit Bongkaran ${trainNoStr}*\n\nSiklus bongkaran telah berjalan 60 menit bersih.\nKontainer Terbongkar: *${session.unloaded_containers}/122*.\nChecker: *${session.checker_name}*`;
+          triggerClientNotification("notif_60m", msg);
+        }
+
+        // B. Notifikasi 100 Menit
+        if (elapsedNetMinutes >= 100 && !flags.notif_100m) {
+          const msg = `⚠️ *Peringatan 100 Menit (Sisa 20 Menit Target)!*\n\nBongkaran ${trainNoStr} telah berjalan *100 Menit*.\nStatus Kontainer: *${session.unloaded_containers}* Terbongkar, *${122 - session.unloaded_containers}* Sisa.\nHarap optimalkan kecepatan pembongkaran!`;
+          triggerClientNotification("notif_100m", msg);
+        }
+
+        // C. Notifikasi 110 Menit
+        if (elapsedNetMinutes >= 110 && !flags.notif_110m) {
+          const msg = `⚠️ *Peringatan 110 Menit (Sisa 10 Menit Target)!*\n\nBongkaran ${trainNoStr} mendekati batas target standar (Sisa 10 Menit).\nStatus Kontainer: *${session.unloaded_containers}/122* Terbongkar.\nHarap koordinasikan percepatan kerja!`;
+          triggerClientNotification("notif_110m", msg);
+        }
+
+        // D. Notifikasi 120 Menit
+        if (elapsedNetMinutes >= 120 && !flags.notif_120m) {
+          const nowSec = Math.floor(Date.now() / 1000);
+          const msg = `🚨 *CRITICAL! Waktu Target Melampaui 120 Menit!*\n\nBongkaran ${trainNoStr} melebihi batas standar (120 Menit).\nDurasi Bersih saat ini: *${elapsedNetMinutes} Menit*.\nKontainer Terbongkar: *${session.unloaded_containers}/122*.\nButuh eskalasi cepat di lapangan!`;
+          triggerClientNotification("notif_120m", msg, { last_overtime_notif: nowSec });
+        }
+
+        // E. Notifikasi 180 Menit
+        if (elapsedNetMinutes >= 180 && !flags.notif_180m) {
+          const msg = `🛑 *MERAH! Batas Akhir 180 Menit Dilanggar!*\n\nBongkaran ${trainNoStr} berada di batas merah operasional.\nDurasi Bersih: *${elapsedNetMinutes} Menit*.\nStatus Kontainer: *${session.unloaded_containers}/122*. Checker: *${session.checker_name}*`;
+          triggerClientNotification("notif_180m", msg);
+        }
+
+        // F. Overtime berkala setiap +10 menit setelah 120 menit
+        if (elapsedNetMinutes >= 120) {
+          const excessMinutes = elapsedNetMinutes - 120;
+          const currentInterval = Math.floor(excessMinutes / 10);
+          const lastInterval = session.last_overtime_interval || 0;
+          if (currentInterval > lastInterval) {
+            const nowSec = Math.floor(Date.now() / 1000);
+            const lockKeyKey = `${session.session_id}-overtime-interval-${currentInterval}`;
+            if (!clientPushedFlagsRef.current[lockKeyKey]) {
+              clientPushedFlagsRef.current[lockKeyKey] = true;
+              const msg = `⚠️ *Peringatan Overtime Berkala! Durasi Melebihi Target (+${currentInterval * 10} Menit)*\n\nBongkaran ${trainNoStr} telah melebihi target waktu standar.\nDurasi murni saat ini: *${elapsedNetMinutes} Menit* murni.\nStatus Kontainer: *${session.unloaded_containers}/122* Terbongkar.\nChecker: *${session.checker_name}*\nGroup Leader: *${session.groupleader_name}*`;
+              
+              (async () => {
+                try {
+                  await updateDoc(docRef, {
+                    "last_overtime_interval": currentInterval,
+                    "last_overtime_notif": nowSec
+                  });
+                  await sendFonnteMessageClient(msg);
+                } catch (err) {
+                  console.error("[Client Overtime] Gagal kirim:", err);
+                  clientPushedFlagsRef.current[lockKeyKey] = false;
+                }
+              })();
+            }
+          }
+        }
+      }
     }, 1000);
 
     return () => clearInterval(interval);
@@ -158,19 +263,34 @@ export function useBongkaranSession(sessionId: string | null) {
 
     // Jika mencapai target, beralih langsung dan kirim notifikasi selesai
     if (isNowCompleted) {
+      const payload = {
+        net_duration_seconds: updatePayload.net_duration_seconds,
+        gross_duration_seconds: updatePayload.gross_duration_seconds,
+        unloaded_containers: nextValue,
+        checker_name: session.checker_name,
+        groupleader_name: session.groupleader_name,
+        train_number: session.train_number,
+        logs: session.logs
+      };
+
       fetch(`/api/sessions/${sessionId}/complete-notif`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
+        body: JSON.stringify(payload)
+      })
+      .then(async (res) => {
+        if (!res.ok) throw new Error(`API returned ${res.status}`);
+      })
+      .catch(async (err) => {
+        console.warn("Gagal mengirim notif autoselesai via API, mencoba client-side fallback:", err);
+        const compiledSession = {
+          ...session,
           net_duration_seconds: updatePayload.net_duration_seconds,
           gross_duration_seconds: updatePayload.gross_duration_seconds,
-          unloaded_containers: nextValue,
-          checker_name: session.checker_name,
-          groupleader_name: session.groupleader_name,
-          train_number: session.train_number,
-          logs: session.logs
-        })
-      }).catch((err) => console.error("Gagal mengirim notif autoselesai:", err));
+          unloaded_containers: nextValue
+        };
+        await triggerCompleteNotificationClient(compiledSession);
+      });
     }
   }, [session, sessionId]);
 
@@ -215,7 +335,14 @@ export function useBongkaranSession(sessionId: string | null) {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ reason })
-    }).catch(err => console.error("Gagal kirim pause notif:", err));
+    })
+    .then(async (res) => {
+      if (!res.ok) throw new Error(`API returned ${res.status}`);
+    })
+    .catch(async (err) => {
+      console.warn("Gagal mengirim pause notif via API, mencoba client-side fallback:", err);
+      await triggerPauseNotificationClient(session, reason);
+    });
   }, [session, sessionId]);
 
   // Resume Sesi setelah Pause
@@ -250,7 +377,14 @@ export function useBongkaranSession(sessionId: string | null) {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ duration_seconds: delayDuration, reason })
-    }).catch(err => console.error("Gagal kirim resume notif:", err));
+    })
+    .then(async (res) => {
+      if (!res.ok) throw new Error(`API returned ${res.status}`);
+    })
+    .catch(async (err) => {
+      console.warn("Gagal mengirim resume notif via API, mencoba client-side fallback:", err);
+      await triggerResumeNotificationClient(session, reason, delayDuration);
+    });
   }, [session, sessionId]);
 
   // Selesaikan Sesi secara manual (Finish)

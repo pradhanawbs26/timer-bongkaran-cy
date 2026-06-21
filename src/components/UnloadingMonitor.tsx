@@ -1,5 +1,6 @@
 import { useState } from "react";
 import { UnloadingSession } from "../types";
+import { triggerCompleteNotificationClient } from "../utils/whatsappNotification";
 import { 
   Play, 
   Pause, 
@@ -123,19 +124,33 @@ export default function UnloadingMonitor({
     setCompleting(true);
     try {
       await onFinish();
-      await fetch(`/api/sessions/${session.session_id}/complete-notif`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
+      
+      const payload = {
+        net_duration_seconds: liveNetSeconds,
+        gross_duration_seconds: liveGrossSeconds,
+        unloaded_containers: session.unloaded_containers,
+        checker_name: session.checker_name,
+        groupleader_name: session.groupleader_name,
+        train_number: session.train_number,
+        logs: session.logs
+      };
+
+      try {
+        const res = await fetch(`/api/sessions/${session.session_id}/complete-notif`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(payload)
+        });
+        if (!res.ok) throw new Error(`API returned ${res.status}`);
+      } catch (err) {
+        console.warn("Gagal mengirim notif penyelesaian via API, mencoba client-side fallback:", err);
+        const compiledSession = {
+          ...session,
           net_duration_seconds: liveNetSeconds,
           gross_duration_seconds: liveGrossSeconds,
-          unloaded_containers: session.unloaded_containers,
-          checker_name: session.checker_name,
-          groupleader_name: session.groupleader_name,
-          train_number: session.train_number,
-          logs: session.logs
-        })
-      });
+        };
+        await triggerCompleteNotificationClient(compiledSession);
+      }
     } catch (e) {
       console.error("Gagal menyelesaikan sesi:", e);
     } finally {
