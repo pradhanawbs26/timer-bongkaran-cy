@@ -27,6 +27,7 @@ interface UnloadingMonitorProps {
   onPause: (reason: string) => Promise<void>;
   onResume: () => Promise<void>;
   onFinish: () => Promise<void>;
+  onReviseStartTime: (newStartTimestamp: number, reason: string) => Promise<void>;
 }
 
 export default function UnloadingMonitor({
@@ -37,12 +38,22 @@ export default function UnloadingMonitor({
   onDecrement,
   onPause,
   onResume,
-  onFinish
+  onFinish,
+  onReviseStartTime
 }: UnloadingMonitorProps) {
   const [showPauseModal, setShowPauseModal] = useState(false);
   const [showFinishConfirm, setShowFinishConfirm] = useState(false);
   const [customReason, setCustomReason] = useState("");
   const [completing, setCompleting] = useState(false);
+
+  // States untuk fitur Revisi Waktu Mulai
+  const [showReviseModal, setShowReviseModal] = useState(false);
+  const [reviseMinutes, setReviseMinutes] = useState("");
+  const [reviseExactTime, setReviseExactTime] = useState("");
+  const [reviseType, setReviseType] = useState<"offset" | "exact">("offset");
+  const [reviseAction, setReviseAction] = useState<"subtract" | "add">("subtract");
+  const [reviseReason, setReviseReason] = useState("Terlewat start timer");
+  const [revising, setRevising] = useState(false);
 
   // Batas 120 Menit Target dalam detik
   const TARGET_SECONDS = 120 * 60; 
@@ -107,6 +118,77 @@ export default function UnloadingMonitor({
     "Stockpile terhambat",
     "Timbangan breakdown"
   ];
+
+  const getJktTimeForInput = (timestampSeconds: number) => {
+    const formatter = new Intl.DateTimeFormat("id-ID", {
+      timeZone: "Asia/Jakarta",
+      year: "numeric",
+      month: "2-digit",
+      day: "2-digit",
+      hour: "2-digit",
+      minute: "2-digit",
+      second: "2-digit",
+      hour12: false
+    });
+    
+    const parts = formatter.formatToParts(new Date(timestampSeconds * 1000));
+    const h = parts.find(p => p.type === "hour")?.value || "12";
+    const m = parts.find(p => p.type === "minute")?.value || "00";
+    return `${h.padStart(2, "0")}:${m.padStart(2, "0")}`;
+  };
+
+  const parseJktTimeToTimestamp = (timeString: string, baseTimestamp: number): number => {
+    const [hoursStr, minutesStr] = timeString.split(":");
+    const hours = parseInt(hoursStr, 10);
+    const minutes = parseInt(minutesStr, 10);
+
+    const d = new Date(baseTimestamp * 1000);
+    const formatter = new Intl.DateTimeFormat("en-US", {
+      timeZone: "Asia/Jakarta",
+      year: "numeric",
+      month: "numeric",
+      day: "numeric"
+    });
+    
+    const parts = formatter.formatToParts(d);
+    const month = parseInt(parts.find(p => p.type === "month")?.value || "1", 10);
+    const day = parseInt(parts.find(p => p.type === "day")?.value || "1", 10);
+    const year = parseInt(parts.find(p => p.type === "year")?.value || "2026", 10);
+
+    const pad = (n: number) => String(n).padStart(2, "0");
+    const isoStr = `${year}-${pad(month)}-${pad(day)}T${pad(hours)}:${pad(minutes)}:00+07:00`;
+    const parsedDate = new Date(isoStr);
+    return Math.floor(parsedDate.getTime() / 1000);
+  };
+
+  const handleReviseSubmit = async () => {
+    setRevising(true);
+    try {
+      let finalTimestamp = session.start_timestamp;
+      if (reviseType === "offset") {
+        const delta = parseInt(reviseMinutes, 10) * 60;
+        if (!isNaN(delta) && delta > 0) {
+          if (reviseAction === "subtract") {
+            finalTimestamp = session.start_timestamp - delta;
+          } else {
+            finalTimestamp = session.start_timestamp + delta;
+          }
+        }
+      } else {
+        if (reviseExactTime) {
+          finalTimestamp = parseJktTimeToTimestamp(reviseExactTime, session.start_timestamp);
+        }
+      }
+      
+      const reasonText = reviseReason.trim() || "Terlewat start timer";
+      await onReviseStartTime(finalTimestamp, reasonText);
+      setShowReviseModal(false);
+    } catch (e) {
+      console.error("Gagal merevisi waktu mulai:", e);
+    } finally {
+      setRevising(false);
+    }
+  };
 
   const handlePauseSelect = async (reason: string) => {
     await onPause(reason);
@@ -251,10 +333,24 @@ export default function UnloadingMonitor({
 
         {/* TARGET CLOCK SCHEDULE PANELS (Informasi Jam Mulai, Selesai, Batas Akhir)  */}
         <div className="w-full mt-4 sm:mt-6 grid grid-cols-3 gap-1.5 sm:gap-2 border-t border-slate-100 dark:border-slate-800 pt-4 sm:pt-5 text-center">
-          <div className="bg-slate-50/50 dark:bg-slate-950/40 p-1.5 sm:p-2.5 rounded-xl sm:rounded-2xl border border-slate-150 dark:border-slate-800/80">
-            <p className="text-[8px] sm:text-[10px] text-slate-500 dark:text-slate-400 font-extrabold uppercase tracking-wider">Jam Mulai</p>
+          <button 
+            type="button"
+            onClick={() => {
+              setReviseExactTime(getJktTimeForInput(session.start_timestamp));
+              setReviseMinutes("");
+              setReviseType("offset");
+              setReviseAction("subtract");
+              setReviseReason("Terlewat start timer");
+              setShowReviseModal(true);
+            }}
+            className="hover:bg-blue-50/40 dark:hover:bg-blue-950/20 hover:border-blue-300 dark:hover:border-blue-900 bg-slate-50/50 dark:bg-slate-950/40 p-1.5 sm:p-2.5 rounded-xl sm:rounded-2xl border border-slate-150 dark:border-slate-800/80 cursor-pointer flex flex-col items-center justify-center transition-all group shadow-sm text-center"
+          >
+            <p className="text-[8px] sm:text-[10px] text-slate-500 dark:text-slate-400 font-extrabold uppercase tracking-wider flex items-center justify-center gap-1 group-hover:text-blue-600 dark:group-hover:text-blue-400 transition-colors">
+              <span>Jam Mulai</span>
+              <span className="text-[7px] sm:text-[8px] text-blue-500 dark:text-blue-400 underline font-normal">(Revisi)</span>
+            </p>
             <p className="text-[10px] sm:text-xs font-black text-slate-800 dark:text-slate-200 mt-1">{jamMulai}</p>
-          </div>
+          </button>
           <div className="bg-emerald-50/20 dark:bg-emerald-950/20 p-1.5 sm:p-2.5 rounded-xl sm:rounded-2xl border border-emerald-150/60 dark:border-emerald-900/60">
             <p className="text-[8px] sm:text-[10px] text-emerald-600 dark:text-emerald-400 font-extrabold uppercase tracking-wider">Target Selesai</p>
             <p className="text-[10px] sm:text-xs font-black text-emerald-700 dark:text-emerald-305 mt-1">{jamTargetSelesai}</p>
@@ -494,6 +590,196 @@ export default function UnloadingMonitor({
                   <div className="animate-spin rounded-full h-4 w-4 border-b-2 border-white"></div>
                 ) : (
                   <span>YA, SELESAI & KIRIM</span>
+                )}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* --- MODAL REVISI WAKTU MULAI --- */}
+      {showReviseModal && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/60 backdrop-blur-sm p-4 overflow-y-auto transition-all">
+          <div className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-3xl p-5 sm:p-6 w-full max-w-md shadow-2xl relative">
+            <button
+              onClick={() => setShowReviseModal(false)}
+              className="absolute right-4 top-4 text-slate-400 hover:text-slate-600 dark:hover:text-slate-300 transition-colors"
+            >
+              <X size={18} />
+            </button>
+
+            <h3 className="text-lg font-black text-slate-900 dark:text-slate-100 mb-1 flex items-center gap-2">
+              <Clock className="text-blue-500 animate-pulse" size={20} />
+              <span>Revisi Waktu Mulai</span>
+            </h3>
+            <p className="text-xs text-slate-500 dark:text-slate-400 mb-5 leading-relaxed font-semibold">
+              Revisi waktu mulai timer jika pembongkaran KA sudah berjalan di lapangan namun terlambat memicu tombol start.
+            </p>
+
+            {/* Selector Tipe Revisi */}
+            <div className="grid grid-cols-2 gap-2 mb-4 bg-slate-100 dark:bg-slate-950 p-1 rounded-xl">
+              <button
+                type="button"
+                onClick={() => setReviseType("offset")}
+                className={`py-2 text-xs font-bold rounded-lg transition ${
+                  reviseType === "offset"
+                    ? "bg-white dark:bg-slate-800 text-blue-600 dark:text-blue-400 shadow-sm"
+                    : "text-slate-600 dark:text-slate-400 hover:text-slate-900"
+                }`}
+              >
+                Selisih Menit
+              </button>
+              <button
+                type="button"
+                onClick={() => setReviseType("exact")}
+                className={`py-2 text-xs font-bold rounded-lg transition ${
+                  reviseType === "exact"
+                    ? "bg-white dark:bg-slate-800 text-blue-600 dark:text-blue-400 shadow-sm"
+                    : "text-slate-600 dark:text-slate-400 hover:text-slate-900"
+                }`}
+              >
+                Jam Spesifik
+              </button>
+            </div>
+
+            {reviseType === "offset" ? (
+              <div className="space-y-4">
+                {/* Arah Selisih */}
+                <div className="flex items-center justify-between border-b border-slate-105 dark:border-slate-800 pb-2">
+                  <span className="text-[10px] text-slate-500 dark:text-slate-400 uppercase tracking-widest font-black">Arah Penyesuaian</span>
+                  <div className="flex gap-1.5">
+                    <button
+                      type="button"
+                      onClick={() => setReviseAction("subtract")}
+                      className={`px-3 py-1 text-xs font-bold rounded-full transition ${
+                        reviseAction === "subtract"
+                          ? "bg-rose-100 dark:bg-rose-950/50 text-rose-700 dark:text-rose-400 border border-rose-200"
+                          : "bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-350"
+                      }`}
+                    >
+                      Mundurkan (Terlewat)
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setReviseAction("add")}
+                      className={`px-3 py-1 text-xs font-bold rounded-full transition ${
+                        reviseAction === "add"
+                          ? "bg-emerald-100 dark:bg-emerald-950/50 text-emerald-700 dark:text-emerald-400 border border-emerald-250"
+                          : "bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-350"
+                      }`}
+                    >
+                      Majukan
+                    </button>
+                  </div>
+                </div>
+
+                {/* Selisih Waktu */}
+                <div className="space-y-2">
+                  <label className="block text-[10px] text-slate-500 dark:text-slate-400 uppercase tracking-widest font-black">
+                    Jumlah Selisih (Menit)
+                  </label>
+                  <input
+                    type="number"
+                    placeholder="Masukkan durasi menit..."
+                    value={reviseMinutes}
+                    onChange={(e) => setReviseMinutes(e.target.value)}
+                    className="w-full bg-slate-50 dark:bg-slate-950 border border-slate-200 dark:border-slate-750 rounded-xl text-sm py-2.5 px-3.5 text-slate-850 dark:text-slate-100 outline-none focus:bg-white focus:border-blue-500"
+                  />
+
+                  {/* Quick select buttons */}
+                  <div className="grid grid-cols-4 gap-1.5 pt-1">
+                    {[5, 10, 15, 20, 30, 45, 60].map((mins) => (
+                      <button
+                        key={mins}
+                        type="button"
+                        onClick={() => setReviseMinutes(String(mins))}
+                        className={`py-1.5 text-xs font-bold rounded-lg border transition ${
+                          reviseMinutes === String(mins)
+                            ? "bg-blue-600 text-white border-blue-600"
+                            : "bg-slate-50 hover:bg-slate-100 border-slate-200 text-slate-700 dark:bg-slate-850 dark:border-slate-750 dark:text-slate-300 dark:hover:bg-slate-800"
+                        }`}
+                      >
+                        {mins}m
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              </div>
+            ) : (
+              <div className="space-y-4">
+                {/* Jam Spesifik */}
+                <div className="space-y-2">
+                  <label className="block text-[10px] text-slate-500 dark:text-slate-400 uppercase tracking-widest font-black">
+                    Waktu Mulai Baru (WIB - Asia/Jakarta)
+                  </label>
+                  <input
+                    type="time"
+                    value={reviseExactTime}
+                    onChange={(e) => setReviseExactTime(e.target.value)}
+                    className="w-full bg-slate-50 dark:bg-slate-950 border border-slate-200 dark:border-slate-750 rounded-xl text-center text-lg font-bold py-3 text-slate-850 dark:text-slate-100 outline-none focus:bg-white focus:border-blue-500"
+                  />
+                  <p className="text-[10px] text-slate-500 dark:text-slate-400 italic text-center">
+                    Gunakan format JKT/WIB yang akurat dari lapangan.
+                  </p>
+                </div>
+              </div>
+            )}
+
+            {/* Input Alasan Revisi */}
+            <div className="mt-4 pt-4 border-t border-slate-101 dark:border-slate-800 space-y-2">
+              <label className="block text-[10px] text-slate-500 dark:text-slate-400 uppercase tracking-widest font-black">
+                Alasan Revisi
+              </label>
+              <input
+                type="text"
+                placeholder="Contoh: Terlewat start timer..."
+                value={reviseReason}
+                onChange={(e) => setReviseReason(e.target.value)}
+                className="w-full bg-slate-50 dark:bg-slate-950 border border-slate-200 dark:border-slate-750 rounded-xl text-xs py-2.5 px-3.5 text-slate-850 dark:text-slate-100 outline-none focus:bg-white focus:border-blue-500"
+              />
+
+              {/* Quick Reason selections */}
+              <div className="flex flex-wrap gap-1.5 pt-1">
+                {[
+                  "Terlewat start timer",
+                  "Koreksi waktu aktual lapangan",
+                  "Penyesuaian jam mulai"
+                ].map((reasonStr) => (
+                  <button
+                    key={reasonStr}
+                    type="button"
+                    onClick={() => setReviseReason(reasonStr)}
+                    className={`py-1 px-2.5 text-[10px] font-bold rounded-full border transition ${
+                      reviseReason === reasonStr
+                        ? "bg-slate-800 text-white border-slate-800 dark:bg-slate-200 dark:text-slate-905"
+                        : "bg-slate-50 hover:bg-slate-100 border-slate-200 text-slate-700 dark:bg-slate-850 dark:border-slate-750 dark:text-slate-400"
+                    }`}
+                  >
+                    {reasonStr}
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            {/* Submit & Cancel Actions */}
+            <div className="mt-6 pt-3 border-t border-slate-100 dark:border-slate-800 grid grid-cols-2 gap-3">
+              <button
+                type="button"
+                onClick={() => setShowReviseModal(false)}
+                className="bg-slate-100 hover:bg-slate-200 text-xs text-slate-700 dark:bg-slate-800 dark:hover:bg-slate-700 dark:text-slate-300 font-bold py-3 rounded-xl transition cursor-pointer"
+              >
+                BATAL
+              </button>
+              <button
+                type="button"
+                onClick={handleReviseSubmit}
+                disabled={revising || (reviseType === "offset" && !reviseMinutes) || (reviseType === "exact" && !reviseExactTime)}
+                className="bg-blue-600 hover:bg-blue-500 active:bg-blue-700 text-white font-bold text-xs py-3 rounded-xl transition cursor-pointer flex items-center justify-center gap-1.5 shadow-md shadow-blue-500/15"
+              >
+                {revising ? (
+                  <div className="animate-spin rounded-full h-4 w-4 border-b-2 border-white"></div>
+                ) : (
+                  <span>SIMPAN REVISI</span>
                 )}
               </button>
             </div>

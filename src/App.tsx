@@ -73,6 +73,7 @@ export default function App() {
     resumeSession,
     finishSession,
     startSession,
+    reviseStartTime,
   } = useBongkaranSession(activeSessionId);
 
   // Simpan activeSessionId ke localStorage saat berubah
@@ -348,6 +349,7 @@ export default function App() {
                   onPause={pauseSession}
                   onResume={resumeSession}
                   onFinish={finishSession}
+                  onReviseStartTime={reviseStartTime}
                 />
               ) : (
                 /* VIEW KOSONG / BELUM ADA SEKTOR KA DIINISIALISASI (FASE 1) */

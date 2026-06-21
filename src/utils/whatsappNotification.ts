@@ -172,3 +172,38 @@ export async function triggerCompleteNotificationClient(session: UnloadingSessio
 
   await sendFonnteMessageClient(msg);
 }
+
+export async function triggerRevisionNotificationClient(
+  session: UnloadingSession | any,
+  oldStartTimestamp: number,
+  newStartTimestamp: number,
+  reason: string
+): Promise<void> {
+  const trainNo = formatTrainNumber(session.train_number);
+  const formatJktTime = (timestampSeconds: number) => {
+    return new Date(timestampSeconds * 1000).toLocaleTimeString("id-ID", {
+      timeZone: "Asia/Jakarta",
+      hour: "2-digit",
+      minute: "2-digit",
+      hour12: false
+    }) + " WIB";
+  };
+
+  const oldTimeStr = formatJktTime(oldStartTimestamp);
+  const newTimeStr = formatJktTime(newStartTimestamp);
+  const newTargetTimeStr = formatJktTime(newStartTimestamp + 120 * 60);
+  const newLimitTimeStr = formatJktTime(newStartTimestamp + 180 * 60);
+
+  const msg = `✏️ *Revisi Waktu Mulai Bongkaran*\n\n` +
+    `KA Nomor: *${trainNo}*\n` +
+    `Checker: *${session.checker_name}*\n` +
+    `Group Leader: *${session.groupleader_name || "-"}*\n\n` +
+    `Waktu Mulai Lama: *${oldTimeStr}*\n` +
+    `Waktu Mulai Baru: *${newTimeStr}*\n` +
+    `Target Selesai Baru: *${newTargetTimeStr}* (120 Menit / 122 Kontainer)\n` +
+    `Batas Akhir Baru: *${newLimitTimeStr}* (180 Menit)\n\n` +
+    `Alasan Revisi: *${reason || "Terlewat start timer"}*`;
+
+  await sendFonnteMessageClient(msg);
+}
+

@@ -7,7 +7,8 @@ import {
   sendFonnteMessageClient,
   triggerPauseNotificationClient,
   triggerResumeNotificationClient,
-  triggerCompleteNotificationClient
+  triggerCompleteNotificationClient,
+  triggerRevisionNotificationClient
 } from "../utils/whatsappNotification";
 
 export function useBongkaranSession(sessionId: string | null) {
@@ -415,6 +416,50 @@ export function useBongkaranSession(sessionId: string | null) {
     });
   }, [session, sessionId]);
 
+  // Revisi Waktu Mulai (Start Time)
+  const reviseStartTime = useCallback(async (newStartTimestamp: number, reason: string) => {
+    if (!session || !sessionId) return;
+    
+    const docRef = doc(db, "sessions", sessionId);
+    const oldStartTimestamp = session.start_timestamp;
+
+    const elapsedGross = Math.floor(Date.now() / 1000) - newStartTimestamp;
+    let totalPausedDuration = 0;
+    session.logs.forEach((l) => {
+      if (l.type === "RESUME" && l.duration_seconds) {
+        totalPausedDuration += l.duration_seconds;
+      }
+    });
+    if (session.status === "PAUSED" && session.last_paused_timestamp) {
+      totalPausedDuration += (Math.floor(Date.now() / 1000) - session.last_paused_timestamp);
+    }
+    const elapsedNetMinutes = Math.floor((elapsedGross - totalPausedDuration) / 60);
+
+    const updatedFlags = { ...(session.flags || {}) };
+    if (elapsedNetMinutes < 60) updatedFlags.notif_60m = false;
+    if (elapsedNetMinutes < 100) updatedFlags.notif_100m = false;
+    if (elapsedNetMinutes < 110) updatedFlags.notif_110m = false;
+    if (elapsedNetMinutes < 120) {
+      updatedFlags.notif_120m = false;
+    }
+    if (elapsedNetMinutes < 180) updatedFlags.notif_180m = false;
+
+    const excessMinutes = Math.max(0, elapsedNetMinutes - 120);
+    const currentInterval = Math.floor(excessMinutes / 10);
+
+    await updateDoc(docRef, {
+      start_timestamp: newStartTimestamp,
+      flags: updatedFlags,
+      last_overtime_interval: currentInterval,
+    });
+
+    try {
+      await triggerRevisionNotificationClient(session, oldStartTimestamp, newStartTimestamp, reason);
+    } catch (err) {
+      console.error("Gagal mengirim notif revisi WA:", err);
+    }
+  }, [session, sessionId]);
+
   // Inisialisasi Sesi Baru (Start Timer)
   const startSession = useCallback(async (
     customSessionId: string,
@@ -472,5 +517,6 @@ export function useBongkaranSession(sessionId: string | null) {
     resumeSession,
     finishSession,
     startSession,
+    reviseStartTime,
   };
 }
