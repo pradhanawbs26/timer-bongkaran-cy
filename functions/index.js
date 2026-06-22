@@ -25,8 +25,8 @@ if (admin.apps.length === 0) {
  * firebase functions:secrets:set FONNTE_API_KEY=KunciAndaDisini
  * firebase functions:secrets:set FONNTE_TARGET_GROUP=NomorGrupWhatsApp
  */
-const FONNTE_API_KEY = process.env.FONNTE_API_KEY || "SAMPLE_FONNTE_API_KEY_123456";
-const FONNTE_TARGET_GROUP = process.env.FONNTE_TARGET_GROUP || "6281234567890-group";
+const FONNTE_API_KEY = process.env.FONNTE_API_KEY || "iNfrBRnqQj4izhPo4PKL";
+const FONNTE_TARGET_GROUP = process.env.FONNTE_TARGET_GROUP || "628117882902-1623340497@g.us";
 
 /**
  * Fungsi Pembantu untuk Mengirim WhatsApp menggunakan Fonnte API
@@ -154,6 +154,11 @@ exports.monitoringBongkaranKA = functions.pubsub
             else if (elapsedNetMinutes >= 100 && !flags.notif_100m) {
               internalMessage = `⚠️ *Peringatan 100 Menit (Sisa 20 Menit Target)!*\n\nBongkaran KA-${session.train_number} telah berjalan *100 Menit*.\nStatus Kontainer: *${session.unloaded_containers || 0}* Terbongkar, *${122 - (session.unloaded_containers || 0)}* Sisa.\nHarap optimalkan kecepatan pembongkaran!`;
               flagKeyToSet = "notif_100m";
+            }
+            // C2. Notifikasi 110 Menit (Warning 10 Menit Sisa Target)
+            else if (elapsedNetMinutes >= 110 && !flags.notif_110m) {
+              internalMessage = `⚠️ *Peringatan 110 Menit (Sisa 10 Menit Target)!*\n\nBongkaran KA-${session.train_number} mendekati batas target standar (Sisa 10 Menit).\nStatus Kontainer: *${session.unloaded_containers || 0}/122* Terbongkar.\nHarap optimalkan kecepatan pembongkaran!`;
+              flagKeyToSet = "notif_110m";
             }
             // D. Notifikasi 120 Menit (Critical Overtime)
             else if (elapsedNetMinutes >= 120 && !flags.notif_120m) {

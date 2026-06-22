@@ -2,7 +2,6 @@ import { useState, useEffect, FormEvent } from "react";
 import { Train, User, ShieldAlert, Play, AlertCircle } from "lucide-react";
 import { collection, getDocs, query, orderBy, limit } from "firebase/firestore";
 import { db } from "../firebaseClient";
-import { triggerStartNotificationClient } from "../utils/whatsappNotification";
 
 interface InitializeSessionProps {
   onStart: (trainNo: string, checker: string, gl: string, sessionId: string) => Promise<boolean>;
@@ -112,19 +111,8 @@ export default function InitializeSession({ onStart }: InitializeSessionProps) {
         .then(async (res) => {
           if (!res.ok) throw new Error(`API returned ${res.status}`);
         })
-        .catch(async (err) => {
-          console.warn("Gagal mengirim notif mulai via API, mencoba client-side fallback:", err);
-          const mockSession = {
-            session_id: generatedSessionId,
-            train_number: formattedTrainNumber,
-            checker_name: checkerName.trim(),
-            groupleader_name: groupLeaderName.trim(),
-            start_timestamp: Math.floor(Date.now() / 1000),
-            unloaded_containers: 0,
-            status: "RUNNING" as const,
-            logs: [],
-          };
-          await triggerStartNotificationClient(mockSession);
+        .catch((err) => {
+          console.warn("Gagal mengirim notif mulai via API:", err);
         });
       } else {
         setErrorMessage("Gagal menginisialisasi sesi di cloud database.");

@@ -3,12 +3,7 @@ import { doc, onSnapshot, updateDoc, setDoc, getDoc, collection, query, where, g
 import { db } from "../firebaseClient";
 import { UnloadingSession, SessionStatus, DelayLog } from "../types";
 import {
-  formatTrainNumber,
-  sendFonnteMessageClient,
-  triggerPauseNotificationClient,
-  triggerResumeNotificationClient,
-  triggerCompleteNotificationClient,
-  triggerRevisionNotificationClient
+  formatTrainNumber
 } from "../utils/whatsappNotification";
 
 export function useBongkaranSession(sessionId: string | null) {
@@ -187,15 +182,8 @@ export function useBongkaranSession(sessionId: string | null) {
       .then(async (res) => {
         if (!res.ok) throw new Error(`API returned ${res.status}`);
       })
-      .catch(async (err) => {
-        console.warn("Gagal mengirim notif autoselesai via API, mencoba client-side fallback:", err);
-        const compiledSession = {
-          ...session,
-          net_duration_seconds: updatePayload.net_duration_seconds,
-          gross_duration_seconds: updatePayload.gross_duration_seconds,
-          unloaded_containers: nextValue
-        };
-        await triggerCompleteNotificationClient(compiledSession);
+      .catch((err) => {
+        console.warn("Gagal mengirim notif autoselesai via API:", err);
       });
     }
   }, [session, sessionId]);
@@ -245,9 +233,8 @@ export function useBongkaranSession(sessionId: string | null) {
     .then(async (res) => {
       if (!res.ok) throw new Error(`API returned ${res.status}`);
     })
-    .catch(async (err) => {
-      console.warn("Gagal mengirim pause notif via API, mencoba client-side fallback:", err);
-      await triggerPauseNotificationClient(session, reason);
+    .catch((err) => {
+      console.warn("Gagal mengirim pause notif via API:", err);
     });
   }, [session, sessionId]);
 
@@ -287,9 +274,8 @@ export function useBongkaranSession(sessionId: string | null) {
     .then(async (res) => {
       if (!res.ok) throw new Error(`API returned ${res.status}`);
     })
-    .catch(async (err) => {
-      console.warn("Gagal mengirim resume notif via API, mencoba client-side fallback:", err);
-      await triggerResumeNotificationClient(session, reason, delayDuration);
+    .catch((err) => {
+      console.warn("Gagal mengirim resume notif via API:", err);
     });
   }, [session, sessionId]);
 
@@ -358,11 +344,18 @@ export function useBongkaranSession(sessionId: string | null) {
       last_overtime_interval: currentInterval,
     });
 
-    try {
-      await triggerRevisionNotificationClient(session, oldStartTimestamp, newStartTimestamp, reason);
-    } catch (err) {
-      console.error("Gagal mengirim notif revisi WA:", err);
-    }
+    // Pemicu notifikasi WA untuk revisi waktu mulai melalui server backend
+    fetch(`/api/sessions/${sessionId}/revise-notif`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ oldStartTimestamp, newStartTimestamp, reason })
+    })
+    .then(async (res) => {
+      if (!res.ok) throw new Error(`API returned ${res.status}`);
+    })
+    .catch((err) => {
+      console.error("Gagal mengirim notif revisi WA via API:", err);
+    });
   }, [session, sessionId]);
 
   // Inisialisasi Sesi Baru (Start Timer)

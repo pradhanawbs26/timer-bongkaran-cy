@@ -1,6 +1,5 @@
 import { useState } from "react";
 import { UnloadingSession } from "../types";
-import { triggerCompleteNotificationClient } from "../utils/whatsappNotification";
 import { 
   Play, 
   Pause, 
@@ -225,13 +224,7 @@ export default function UnloadingMonitor({
         });
         if (!res.ok) throw new Error(`API returned ${res.status}`);
       } catch (err) {
-        console.warn("Gagal mengirim notif penyelesaian via API, mencoba client-side fallback:", err);
-        const compiledSession = {
-          ...session,
-          net_duration_seconds: liveNetSeconds,
-          gross_duration_seconds: liveGrossSeconds,
-        };
-        await triggerCompleteNotificationClient(compiledSession);
+        console.warn("Gagal mengirim notif penyelesaian via API:", err);
       }
     } catch (e) {
       console.error("Gagal menyelesaikan sesi:", e);

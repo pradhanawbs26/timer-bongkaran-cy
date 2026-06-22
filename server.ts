@@ -166,7 +166,8 @@ const activeSendingLocks = {
 async function attemptSendNotificationWithLock(
   sessionId: string, 
   flagKey: string, 
-  messageBuilder: (data: any) => string | Promise<string>
+  messageBuilder: (data: any) => string | Promise<string>,
+  additionalUpdates?: Record<string, any>
 ): Promise<boolean> {
   const ref = doc(db, "sessions", sessionId);
   try {
@@ -194,7 +195,8 @@ async function attemptSendNotificationWithLock(
       
       // Update flag di database secara atomik dalam transaksi sebelum memicu API luar
       transaction.update(ref, {
-        [`flags.${flagKey}`]: true
+        [`flags.${flagKey}`]: true,
+        ...(additionalUpdates || {})
       });
       return true;
     });
@@ -604,6 +606,9 @@ app.post("/api/sessions/:id/complete-notif", async (req, res) => {
       activeSendingLocks.completed.delete(id);
       return res.status(404).json({ error: "Sesi tidak ditemukan" });
     }
+
+    const payloadNetSec = (req.body.net_duration_seconds !== undefined) ? req.body.net_duration_seconds : (session.net_duration_seconds || 0);
+    const payloadGrossSec = (req.body.gross_duration_seconds !== undefined) ? req.body.gross_duration_seconds : (session.gross_duration_seconds || 0);
     
     const success = await attemptSendNotificationWithLock(docId, "notif_completed", (transactionData) => {
       const freshData = transactionData || session;
@@ -642,6 +647,11 @@ app.post("/api/sessions/:id/complete-notif", async (req, res) => {
       const delayDetails = detailStrings.length > 0 ? detailStrings.join(", ") : "Tidak Ada Delay";
 
       return `✅ *Bongkaran KA Selesai!*\n\nNomor KA: *${finalTrainNo}*\nSelesai Pada: ${new Date().toLocaleDateString("id-ID", { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' })} WIB\nTarget Waktu: *120 Menit*\n*Net Duration:* ${netMinutes} Menit\n*Gross Duration:* ${grossMinutes} Menit (Total Delay *${totalDelayMinutes} Menit*)\n\n*Rincian Delay:* ${delayDetails}\n\nChecker: *${finalChecker}*\nGroup Leader: *${finalGroupLeader}*`;
+    }, {
+      status: "COMPLETED",
+      net_duration_seconds: payloadNetSec,
+      gross_duration_seconds: payloadGrossSec,
+      last_paused_timestamp: null
     });
     
     // Tahan kunci selama 30 detik untuk meredam pemanggilan simultan dari browser
@@ -656,6 +666,54 @@ app.post("/api/sessions/:id/complete-notif", async (req, res) => {
     }
   } catch (error: any) {
     activeSendingLocks.completed.delete(id);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// API Endpoint untuk Revisi Waktu Mulai
+app.post("/api/sessions/:id/revise-notif", async (req, res) => {
+  const { id } = req.params;
+  const { oldStartTimestamp, newStartTimestamp, reason } = req.body;
+
+  try {
+    let session: any = null;
+    const snapshot = await getDocs(query(collection(db, "sessions"), where("session_id", "==", id)));
+    if (!snapshot.empty) {
+      session = snapshot.docs[0].data();
+    } else {
+      const docSnap = await getDoc(doc(db, "sessions", id));
+      if (docSnap.exists()) {
+        session = docSnap.data();
+      }
+    }
+
+    if (!session) {
+      return res.status(404).json({ error: "Sesi tidak ditemukan" });
+    }
+
+    const trainNo = formatTrainNumber(session.train_number);
+
+    const formatJktTime = (timestampSeconds: number) => {
+      return new Date(timestampSeconds * 1000).toLocaleTimeString("id-ID", {
+        timeZone: "Asia/Jakarta",
+        hour: "2-digit",
+        minute: "2-digit",
+        hour12: false
+      }) + " WIB";
+    };
+
+    const oldTimeStr = formatJktTime(oldStartTimestamp);
+    const newTimeStr = formatJktTime(newStartTimestamp);
+
+    const msg = `✏️ *Revisi Waktu Mulai Bongkaran KA ${trainNo}*\n\n` +
+      `Checker: *${session.checker_name}*\n` +
+      `Waktu Semula: ${oldTimeStr}\n` +
+      `Waktu Baru: *${newTimeStr}*\n` +
+      `Alasan Revisi: *${reason || "Penyesuaian waktu operasional"}*`;
+
+    await sendFonnteMessage(msg);
+    res.json({ success: true });
+  } catch (error: any) {
     res.status(500).json({ error: error.message });
   }
 });
