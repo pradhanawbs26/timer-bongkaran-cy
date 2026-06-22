@@ -194,6 +194,23 @@ async function runTimerSimulationEngine() {
       const sessionId = document.id;
       const ref = doc(db, "sessions", sessionId);
 
+      // Skenario Sesi Terbengkalai: Jika durasi gross melebihi 8 jam (28800 detik), auto-set COMPLETED secara senyap
+      const elapsedGrossCheck = nowSeconds - session.start_timestamp;
+      if (session.status !== "COMPLETED" && elapsedGrossCheck > 8 * 3600) {
+        console.log(`[Simulation Engine] Sesi ${sessionId} (${session.train_number}) dideteksi terbengkalai > 8 jam. Auto-complete secara senyap.`);
+        try {
+          await updateDoc(ref, {
+            status: "COMPLETED",
+            "flags.notif_completed": true, // bypass agar tidak spamming pesan selesai
+            net_duration_seconds: session.net_duration_seconds || 0,
+            gross_duration_seconds: elapsedGrossCheck
+          });
+        } catch (err) {
+          console.error("[Simulation Engine] Gagal menutup sesi terbengkalai:", err);
+        }
+        continue;
+      }
+
       // Jika status sesi sudah COMPLETED, periksa apakah notifikasi penyelesaian sudah terkirim atau belum
       if (session.status === "COMPLETED") {
         const flags = session.flags || {};

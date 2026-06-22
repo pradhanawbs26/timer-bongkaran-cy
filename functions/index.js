@@ -104,6 +104,18 @@ exports.monitoringBongkaranKA = functions.pubsub
         // Durasi Kotor (Gross): Dari start_timestamp hingga sekarang
         const elapsedGross = nowSeconds - startTimestamp;
 
+        // Skenario Sesi Terbengkalai (> 8 jam): auto-complete secara senyap
+        if (elapsedGross > 8 * 3600) {
+          console.log(`[Timer Engine Web Function] Sesi ${sessionId} (${trainNumber}) dideteksi terbengkalai > 8 jam. Auto-complete.`);
+          batch.update(sessionRef, {
+            status: "COMPLETED",
+            "flags.notif_completed": true, // bypass notifikasi selesai agar tidak spamming
+            gross_duration_seconds: elapsedGross,
+            net_duration_seconds: session.net_duration_seconds || elapsedGross,
+          });
+          continue;
+        }
+
         // Hitung total akumulasi durasi pause (dari tabulasi RESUME)
         let totalPausedSeconds = 0;
         logs.forEach((log) => {

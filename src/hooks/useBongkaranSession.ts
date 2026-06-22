@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback, useRef } from "react";
-import { doc, onSnapshot, updateDoc, setDoc, getDoc } from "firebase/firestore";
+import { doc, onSnapshot, updateDoc, setDoc, getDoc, collection, query, where, getDocs, writeBatch } from "firebase/firestore";
 import { db } from "../firebaseClient";
 import { UnloadingSession, SessionStatus, DelayLog } from "../types";
 import {
@@ -468,6 +468,37 @@ export function useBongkaranSession(sessionId: string | null) {
     groupleaderName: string
   ): Promise<boolean> => {
     const nowSeconds = Math.floor(Date.now() / 1000);
+
+    // Auto-complete sesi aktif sebelumnya agar tidak menimbulkan notifikasi double atau bertumpuk-tumpuk
+    try {
+      const activeQuery = query(
+        collection(db, "sessions"),
+        where("status", "in", ["RUNNING", "PAUSED"])
+      );
+      const activeSnapshot = await getDocs(activeQuery);
+      if (!activeSnapshot.empty) {
+        const batch = writeBatch(db);
+        activeSnapshot.forEach((docSnap) => {
+          // Jangan bersihkan dirinya sendiri jika ID kebetulan sama
+          if (docSnap.id === customSessionId) return;
+
+          const data = docSnap.data();
+          const oldStart = data.start_timestamp || nowSeconds;
+          const oldElapsedGross = nowSeconds - oldStart;
+          
+          batch.update(docSnap.ref, {
+            status: "COMPLETED",
+            "flags.notif_completed": true, // bypass notifikasi selesai agar tidak spamming
+            gross_duration_seconds: oldElapsedGross,
+            net_duration_seconds: data.net_duration_seconds || oldElapsedGross
+          });
+        });
+        await batch.commit();
+        console.log(`[startSession] Berhasil menghentikan secara bersih ${activeSnapshot.size} sesi aktif sebelumnya.`);
+      }
+    } catch (clearErr) {
+      console.warn("Gagal membersihkan sesi aktif sebelumnya secara otomatis:", clearErr);
+    }
 
     const newSessionDoc: UnloadingSession = {
       session_id: customSessionId,
