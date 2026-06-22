@@ -166,7 +166,7 @@ const activeSendingLocks = {
 async function attemptSendNotificationWithLock(
   sessionId: string, 
   flagKey: string, 
-  messageBuilder: () => string | Promise<string>
+  messageBuilder: (data: any) => string | Promise<string>
 ): Promise<boolean> {
   const ref = doc(db, "sessions", sessionId);
   try {
@@ -190,7 +190,7 @@ async function attemptSendNotificationWithLock(
         return false;
       }
 
-      messageToSend = await messageBuilder();
+      messageToSend = await messageBuilder(data);
       
       // Update flag di database secara atomik dalam transaksi sebelum memicu API luar
       transaction.update(ref, {
@@ -532,46 +532,41 @@ app.post("/api/sessions/:id/start-notif", async (req, res) => {
     }
     const session = snapshot.docs[0].data();
     const docId = snapshot.docs[0].id;
-    const ref = doc(db, "sessions", docId);
 
-    // Kirim jika flag notif belum diset
-    if (!session.flags?.notif_start) {
-      // Set flag di Firestore secepatnya
-      await updateDoc(ref, {
-        "flags.notif_start": true
-      });
+    const trainNo = formatTrainNumber(session.train_number);
+    const formatJktTime = (timestampSeconds: number) => {
+      return new Date(timestampSeconds * 1000).toLocaleTimeString("id-ID", {
+        timeZone: "Asia/Jakarta",
+        hour: "2-digit",
+        minute: "2-digit",
+        hour12: false
+      }) + " WIB";
+    };
+    
+    const startTimeStr = formatJktTime(session.start_timestamp);
+    const targetTimeStr = formatJktTime(session.start_timestamp + 120 * 60);
+    const limitTimeStr = formatJktTime(session.start_timestamp + 180 * 60);
 
-      const trainNo = formatTrainNumber(session.train_number);
-      const formatJktTime = (timestampSeconds: number) => {
-        return new Date(timestampSeconds * 1000).toLocaleTimeString("id-ID", {
-          timeZone: "Asia/Jakarta",
-          hour: "2-digit",
-          minute: "2-digit",
-          hour12: false
-        }) + " WIB";
-      };
-      
-      const startTimeStr = formatJktTime(session.start_timestamp);
-      const targetTimeStr = formatJktTime(session.start_timestamp + 120 * 60);
-      const limitTimeStr = formatJktTime(session.start_timestamp + 180 * 60);
+    const msg = `📢 *Bongkaran KA Dimulai*\n\n` +
+      `KA Nomor: *${trainNo}*\n` +
+      `Checker: *${session.checker_name}*\n` +
+      `Group Leader: *${session.groupleader_name}*\n` +
+      `Waktu Mulai: *${startTimeStr}*\n` +
+      `Target Selesai: *${targetTimeStr}* (120 Menit / 122 Kontainer)\n` +
+      `Batas Akhir: *${limitTimeStr}* (180 Menit)`;
 
-      const msg = `📢 *Bongkaran KA Dimulai*\n\n` +
-        `KA Nomor: *${trainNo}*\n` +
-        `Checker: *${session.checker_name}*\n` +
-        `Group Leader: *${session.groupleader_name}*\n` +
-        `Waktu Mulai: *${startTimeStr}*\n` +
-        `Target Selesai: *${targetTimeStr}* (120 Menit / 122 Kontainer)\n` +
-        `Batas Akhir: *${limitTimeStr}* (180 Menit)`;
-
-      await sendFonnteMessage(msg);
-    }
+    const success = await attemptSendNotificationWithLock(docId, "notif_start", () => msg);
     
     // Tahan kunci selama 30 detik untuk mengendapkan balapan ganda
     setTimeout(() => {
       activeSendingLocks.start.delete(id);
     }, 30000);
 
-    res.json({ success: true, message: "Notifikasi mulai terkirim!" });
+    if (success) {
+      return res.json({ success: true, message: "Notifikasi mulai terkirim!" });
+    } else {
+      return res.json({ success: true, message: "Notifikasi mulai sudah pernah terkirim sebelumnya atau digagalkan oleh pengunci transaksi." });
+    }
   } catch (error: any) {
     activeSendingLocks.start.delete(id);
     res.status(500).json({ error: error.message });
@@ -589,6 +584,7 @@ app.post("/api/sessions/:id/complete-notif", async (req, res) => {
 
     // Ambil dokumen secara mandiri/langsung demi konsistensi maksimal
     let session: any = null;
+    let docId = id;
     let ref = doc(db, "sessions", id);
     let docSnap = await getDoc(ref);
 
@@ -599,7 +595,8 @@ app.post("/api/sessions/:id/complete-notif", async (req, res) => {
       if (!snapshot.empty) {
         docSnap = snapshot.docs[0];
         session = docSnap.data();
-        ref = doc(db, "sessions", docSnap.id);
+        docId = docSnap.id;
+        ref = doc(db, "sessions", docId);
       }
     }
 
@@ -608,60 +605,55 @@ app.post("/api/sessions/:id/complete-notif", async (req, res) => {
       return res.status(404).json({ error: "Sesi tidak ditemukan" });
     }
     
-    const flags = session.flags || {};
-    if (flags.notif_completed) {
-      activeSendingLocks.completed.delete(id);
-      return res.json({ success: true, message: "Notifikasi penyelesaian sudah pernah dikirim sebelumnya." });
-    }
+    const success = await attemptSendNotificationWithLock(docId, "notif_completed", (transactionData) => {
+      const freshData = transactionData || session;
+      
+      // Gunakan request body sebagai fallback utama jika Firestore belum tuntas saat trigger dipanggil
+      const finalNetSec = (req.body.net_duration_seconds !== undefined) ? req.body.net_duration_seconds : (freshData.net_duration_seconds || 0);
+      const finalGrossSec = (req.body.gross_duration_seconds !== undefined) ? req.body.gross_duration_seconds : (freshData.gross_duration_seconds || 0);
+      const finalChecker = req.body.checker_name || freshData.checker_name || "";
+      const finalGroupLeader = req.body.groupleader_name || freshData.groupleader_name || "";
+      const finalTrainNo = formatTrainNumber(req.body.train_number || freshData.train_number || "");
+      const finalLogs = req.body.logs || freshData.logs || [];
 
-    // Set flag ke Firestore secepatnya sebelum kita buat API call eksternal Fonnte
-    await updateDoc(ref, {
-      "flags.notif_completed": true
+      // Kirim notifikasi ringkasan penyelesaian via Fonnte
+      const totalDelaySeconds = finalGrossSec - finalNetSec;
+      const totalDelayMinutes = Math.max(0, Math.floor(totalDelaySeconds / 60));
+      const netMinutes = Math.floor(finalNetSec / 60);
+      const grossMinutes = Math.floor(finalGrossSec / 60);
+
+      // Hitung rincian delay dari logs
+      interface DelayBreakdown { [key: string]: number }
+      const breakdown: DelayBreakdown = {};
+      
+      // Identifikasi rincian delay
+      for (let i = 0; i < finalLogs.length; i++) {
+         if (finalLogs[i].type === "PAUSE" && finalLogs[i].reason) {
+            const reason = finalLogs[i].reason;
+            // Cari resume berikutnya untuk hitung durasi delay
+            const resumeLog = finalLogs.slice(i).find((l: any) => l.type === "RESUME");
+            const duration = resumeLog?.duration_seconds || 0;
+            const minutes = Math.floor(duration / 60);
+            breakdown[reason] = (breakdown[reason] || 0) + minutes;
+         }
+      }
+
+      const detailStrings = Object.entries(breakdown).map(([reason, minutes]) => `${reason} (${minutes} mnt)`);
+      const delayDetails = detailStrings.length > 0 ? detailStrings.join(", ") : "Tidak Ada Delay";
+
+      return `✅ *Bongkaran KA Selesai!*\n\nNomor KA: *${finalTrainNo}*\nSelesai Pada: ${new Date().toLocaleDateString("id-ID", { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' })} WIB\nTarget Waktu: *120 Menit*\n*Net Duration:* ${netMinutes} Menit\n*Gross Duration:* ${grossMinutes} Menit (Total Delay *${totalDelayMinutes} Menit*)\n\n*Rincian Delay:* ${delayDetails}\n\nChecker: *${finalChecker}*\nGroup Leader: *${finalGroupLeader}*`;
     });
-    
-    // Gunakan request body sebagai fallback utama jika Firestore replikasi dari client belum tuntas saat trigger dipanggil
-    const finalNetSec = (req.body.net_duration_seconds !== undefined) ? req.body.net_duration_seconds : (session.net_duration_seconds || 0);
-    const finalGrossSec = (req.body.gross_duration_seconds !== undefined) ? req.body.gross_duration_seconds : (session.gross_duration_seconds || 0);
-    const finalChecker = req.body.checker_name || session.checker_name || "";
-    const finalGroupLeader = req.body.groupleader_name || session.groupleader_name || "";
-    const finalTrainNo = formatTrainNumber(req.body.train_number || session.train_number || "");
-    const finalLogs = req.body.logs || session.logs || [];
-
-    // Kirim notifikasi ringkasan penyelesaian via Fonnte
-    const totalDelaySeconds = finalGrossSec - finalNetSec;
-    const totalDelayMinutes = Math.max(0, Math.floor(totalDelaySeconds / 60));
-    const netMinutes = Math.floor(finalNetSec / 60);
-    const grossMinutes = Math.floor(finalGrossSec / 60);
-
-    // Hitung rincian delay dari logs
-    interface DelayBreakdown { [key: string]: number }
-    const breakdown: DelayBreakdown = {};
-    
-    // Identifikasi rincian delay
-    for (let i = 0; i < finalLogs.length; i++) {
-       if (finalLogs[i].type === "PAUSE" && finalLogs[i].reason) {
-          const reason = finalLogs[i].reason;
-          // Cari resume berikutnya untuk hitung durasi delay
-          const resumeLog = finalLogs.slice(i).find((l: any) => l.type === "RESUME");
-          const duration = resumeLog?.duration_seconds || 0;
-          const minutes = Math.floor(duration / 60);
-          breakdown[reason] = (breakdown[reason] || 0) + minutes;
-       }
-    }
-
-    const detailStrings = Object.entries(breakdown).map(([reason, minutes]) => `${reason} (${minutes} mnt)`);
-    const delayDetails = detailStrings.length > 0 ? detailStrings.join(", ") : "Tidak Ada Delay";
-
-    const msg = `✅ *Bongkaran KA Selesai!*\n\nNomor KA: *${finalTrainNo}*\nSelesai Pada: ${new Date().toLocaleDateString("id-ID", { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' })} WIB\nTarget Waktu: *120 Menit*\n*Net Duration:* ${netMinutes} Menit\n*Gross Duration:* ${grossMinutes} Menit (Total Delay *${totalDelayMinutes} Menit*)\n\n*Rincian Delay:* ${delayDetails}\n\nChecker: *${finalChecker}*\nGroup Leader: *${finalGroupLeader}*`;
-
-    await sendFonnteMessage(msg);
     
     // Tahan kunci selama 30 detik untuk meredam pemanggilan simultan dari browser
     setTimeout(() => {
       activeSendingLocks.completed.delete(id);
     }, 30000);
 
-    res.json({ success: true, message: "Notifikasi penyelesaian terkirim!" });
+    if (success) {
+      return res.json({ success: true, message: "Notifikasi penyelesaian terkirim!" });
+    } else {
+      return res.json({ success: true, message: "Notifikasi penyelesaian sudah pernah dikirim sebelumnya atau dibatalkan oleh pengunci transaksi." });
+    }
   } catch (error: any) {
     activeSendingLocks.completed.delete(id);
     res.status(500).json({ error: error.message });
