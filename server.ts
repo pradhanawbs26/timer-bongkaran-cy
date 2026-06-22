@@ -518,6 +518,52 @@ app.post("/api/sessions/:id/tick", async (req, res) => {
   }
 });
 
+// API Endpoint untuk memicu jalannya simulasi/evaluasi timer dari cron job luar gratis (misalnya cron-job.org atau vercel cron)
+app.get("/api/cron-evaluate", async (req, res) => {
+  try {
+    console.log("[Cron API] Menerima trigger eksternal untuk pemindaian sesi aktif...");
+    const wasRunning = isRunningEngine;
+    if (wasRunning) {
+      return res.json({ 
+        success: true, 
+        message: "Evaluasi timer sedang berjalan di latar belakang (simulasi aktif).",
+        was_running: true 
+      });
+    }
+    await runTimerSimulationEngine();
+    return res.json({ 
+      success: true, 
+      message: "Evaluasi timer berhasil dipicu dan diselesaikan.", 
+      was_running: false 
+    });
+  } catch (error: any) {
+    console.error("[Cron API] Gagal memproses evaluasi timer:", error);
+    return res.status(500).json({ error: error.message });
+  }
+});
+
+app.post("/api/cron-evaluate", async (req, res) => {
+  try {
+    const wasRunning = isRunningEngine;
+    if (wasRunning) {
+      return res.json({ 
+        success: true, 
+        message: "Evaluasi timer sedang berjalan di latar belakang (simulasi aktif).",
+        was_running: true 
+      });
+    }
+    await runTimerSimulationEngine();
+    return res.json({ 
+      success: true, 
+      message: "Evaluasi timer berhasil dipicu dan diselesaikan.", 
+      was_running: false 
+    });
+  } catch (error: any) {
+    console.error("[Cron API] Gagal memproses evaluasi timer:", error);
+    return res.status(500).json({ error: error.message });
+  }
+});
+
 // API Endpoint untuk memicu Notifikasi Mulai (Fase 1: Mulai)
 app.post("/api/sessions/:id/start-notif", async (req, res) => {
   const { id } = req.params;
