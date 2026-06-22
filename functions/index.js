@@ -79,143 +79,125 @@ exports.monitoringBongkaranKA = functions.pubsub
         return null;
       }
 
-      const batch = db.batch();
       let updatedCount = 0;
 
-      // Iterasi setiap sesi yang sedang berjalan
-      for (const doc of snapshot.docs) {
-        const sessionRef = doc.ref;
-        const session = doc.data();
+      // Iterasi setiap sesi yang sedang berjalan menggunakan transaksi atomik (Idempotent)
+      for (const docSnapshot of snapshot.docs) {
+        const sessionId = docSnapshot.id;
+        const ref = db.collection("sessions").doc(sessionId);
 
-        const sessionId = session.session_id;
-        const trainNumber = session.train_number;
-        const startTimestamp = session.start_timestamp;
-        const logs = session.logs || [];
-        const flags = session.flags || {
-          notif_start: false,
-          notif_60m: false,
-          notif_100m: false,
-          notif_120m: false,
-          notif_180m: false,
-        };
+        try {
+          const messageToSend = await db.runTransaction(async (transaction) => {
+            const freshDoc = await transaction.get(ref);
+            if (!freshDoc.exists) return null;
+            const session = freshDoc.data();
 
-        // --- 1. HITUNG DURASI MURNI & DURASI KOTOR ---
-        
-        // Durasi Kotor (Gross): Dari start_timestamp hingga sekarang
-        const elapsedGross = nowSeconds - startTimestamp;
+            // Sesi harus bernilai RUNNING, jika sudah diselesaikan JANGAN melanjutkan alarm!
+            if (session.status !== "RUNNING") {
+              return null;
+            }
 
-        // Skenario Sesi Terbengkalai (> 8 jam): auto-complete secara senyap
-        if (elapsedGross > 8 * 3600) {
-          console.log(`[Timer Engine Web Function] Sesi ${sessionId} (${trainNumber}) dideteksi terbengkalai > 8 jam. Auto-complete.`);
-          batch.update(sessionRef, {
-            status: "COMPLETED",
-            "flags.notif_completed": true, // bypass notifikasi selesai agar tidak spamming
-            gross_duration_seconds: elapsedGross,
-            net_duration_seconds: session.net_duration_seconds || elapsedGross,
+            const startTimestamp = session.start_timestamp;
+            const logs = session.logs || [];
+            const flags = session.flags || {};
+            
+            // Durasi kotor (gross)
+            const elapsedGross = nowSeconds - startTimestamp;
+
+            // Skenario Sesi Terbengkalai (> 8 jam)
+            if (elapsedGross > 8 * 3600) {
+              console.log(`[Timer Engine Web Function] Sesi ${sessionId} dideteksi terbengkalai > 8 jam. Auto-complete.`);
+              transaction.update(ref, {
+                status: "COMPLETED",
+                "flags.notif_completed": true, // bypass notifikasi selesai agar tidak spamming
+                gross_duration_seconds: elapsedGross,
+                net_duration_seconds: session.net_duration_seconds || elapsedGross,
+              });
+              return null;
+            }
+
+            // Hitung total akumulasi durasi pause (dari tabulasi RESUME)
+            let totalPausedSeconds = 0;
+            logs.forEach((log) => {
+              if (log.type === "RESUME" && log.duration_seconds) {
+                totalPausedSeconds += log.duration_seconds;
+              }
+            });
+
+            // Jika sedang PAUSED, tambahkan durasi pause yang sedang berjalan
+            if (session.status === "PAUSED" && session.last_paused_timestamp) {
+              totalPausedSeconds += (nowSeconds - session.last_paused_timestamp);
+            }
+
+            const elapsedNet = elapsedGross - totalPausedSeconds;
+            const elapsedNetMinutes = Math.floor(elapsedNet / 60);
+
+            const updatePayload = {
+              net_duration_seconds: elapsedNet,
+              gross_duration_seconds: elapsedGross,
+            };
+
+            let internalMessage = "";
+            let flagKeyToSet = "";
+
+            // A. Notifikasi Fase 1 (Sesi Dimulai)
+            if (!flags.notif_start) {
+              internalMessage = `📢 *Bongkaran KA Dimulai*\n\nKA Nomor: *${session.train_number}*\nChecker: *${session.checker_name}*\nGroup Leader: *${session.groupleader_name}*\nWaktu Mulai: ${new Date().toLocaleString("id-ID", { timeZone: "Asia/Jakarta" })} WIB\nTarget Target: *120 Menit* (122 Kontainer)`;
+              flagKeyToSet = "notif_start";
+            }
+            // B. Notifikasi 60 Menit
+            else if (elapsedNetMinutes >= 60 && !flags.notif_60m) {
+              internalMessage = `⏳ *Info 60 Menit Bongkaran KA-${session.train_number}*\n\nSiklus bongkaran telah berjalan 60 menit bersih.\nKontainer Terbongkar: *${session.unloaded_containers || 0}/122*.\nChecker: ${session.checker_name}`;
+              flagKeyToSet = "notif_60m";
+            }
+            // C. Notifikasi 100 Menit (Warning)
+            else if (elapsedNetMinutes >= 100 && !flags.notif_100m) {
+              internalMessage = `⚠️ *Peringatan 100 Menit (Sisa 20 Menit Target)!*\n\nBongkaran KA-${session.train_number} telah berjalan *100 Menit*.\nStatus Kontainer: *${session.unloaded_containers || 0}* Terbongkar, *${122 - (session.unloaded_containers || 0)}* Sisa.\nHarap optimalkan kecepatan pembongkaran!`;
+              flagKeyToSet = "notif_100m";
+            }
+            // D. Notifikasi 120 Menit (Critical Overtime)
+            else if (elapsedNetMinutes >= 120 && !flags.notif_120m) {
+              internalMessage = `🚨 *CRITICAL! Waktu Target Melampaui 120 Menit!*\n\nBongkaran KA-${session.train_number} melebihi batas standar (120 Menit).\nDurasi Bersih saat ini: *${elapsedNetMinutes} Menit*.\nKontainer Terbongkar: *${session.unloaded_containers || 0}/122*.\nButuh eskalasi dan tindakan cepat di lapangan!`;
+              flagKeyToSet = "notif_120m";
+            }
+            // E. Notifikasi 180 Menit (Batas Akhir / Redline)
+            else if (elapsedNetMinutes >= 180 && !flags.notif_180m) {
+              internalMessage = `🛑 *MERAH! Batas Akhir 180 Menit Dilanggar!*\n\nBongkaran KA-${session.train_number} berada di batas merah operasional.\nDurasi Bersih: *${elapsedNetMinutes} Menit*.\nStatus Kontainer: *${session.unloaded_containers || 0}/122*. Checker: *${session.checker_name}*`;
+              flagKeyToSet = "notif_180m";
+            }
+            // F. Notifikasi Overtime Berkala Setiap 10 Menit Terlewat dari Target 120 Menit
+            else if (elapsedNetMinutes >= 120) {
+              const excessMinutes = elapsedNetMinutes - 120;
+              const currentInterval = Math.floor(excessMinutes / 10);
+              const lastInterval = session.last_overtime_interval !== undefined && session.last_overtime_interval !== null 
+                ? session.last_overtime_interval 
+                : 0;
+
+              if (currentInterval > lastInterval) {
+                internalMessage = `⚠️ *Eskalasi Overtime Berkala! (Setiap 10 Menit)*\n\nBongkaran KA-${session.train_number} telah berjalan *${elapsedNetMinutes} Menit* murni.\nStatus Kontainer: *${session.unloaded_containers || 0}* Terbongkar, *${122 - (session.unloaded_containers || 0)}* Sisa.\nGroup Leader: *${session.groupleader_name}*\nSegera selesaikan sisa pembongkaran!`;
+                updatePayload.last_overtime_interval = currentInterval;
+                updatePayload.last_overtime_notif = nowSeconds;
+              }
+            }
+
+            if (flagKeyToSet) {
+              updatePayload[`flags.${flagKeyToSet}`] = true;
+            }
+
+            transaction.update(ref, updatePayload);
+            return internalMessage;
           });
-          continue;
-        }
 
-        // Hitung total akumulasi durasi pause (dari tabulasi RESUME)
-        let totalPausedSeconds = 0;
-        logs.forEach((log) => {
-          if (log.type === "RESUME" && log.duration_seconds) {
-            totalPausedSeconds += log.duration_seconds;
-          }
-        });
-
-        // Durasi Bersih (Net): Gross dikurangi waktu tunda
-        const elapsedNet = elapsedGross - totalPausedSeconds;
-        const elapsedNetMinutes = Math.floor(elapsedNet / 60);
-
-        console.log(
-          `[KA-${trainNumber}] ID: ${sessionId} -> Gross: ${elapsedGross}s, Paused: ${totalPausedSeconds}s, Net: ${elapsedNet}s (${elapsedNetMinutes} mnt)`
-        );
-
-        const updatePayload = {
-          net_duration_seconds: elapsedNet,
-          gross_duration_seconds: elapsedGross,
-        };
-
-        // --- 2. LOGIKA IDEMPOTENCY FLAGS & NOTIFIKASI ANTI-SPAM ---
-        
-        // Notifikasi Fase 1 (Sesi Dimulai) - Jika belum dikirim
-        if (!flags.notif_start) {
-          const msg = `📢 *Bongkaran KA Dimulai*\n\nKA Nomor: *${trainNumber}*\nChecker: *${session.checker_name}*\nGroup Leader: *${session.groupleader_name}*\nWaktu Mulai: ${new Date().toLocaleString("id-ID", { timeZone: "Asia/Jakarta" })} WIB\nTarget Target: *120 Menit* (122 Kontainer)`;
-          
-          flags.notif_start = true;
-          updatePayload["flags.notif_start"] = true;
-          
-          await sendWhatsAppMessage(FONNTE_TARGET_GROUP, msg);
-          updatedCount++;
-        }
-
-        // Notifikasi T waktu 60 Menit
-        if (elapsedNetMinutes >= 60 && !flags.notif_60m) {
-          const msg = `⏳ *Info 60 Menit Bongkaran KA-${trainNumber}*\n\nSiklus bongkaran telah berjalan 60 menit bersih.\nKontainer Terbongkar: *${session.unloaded_containers}/122*.\nChecker: ${session.checker_name}`;
-          
-          flags.notif_60m = true;
-          updatePayload["flags.notif_60m"] = true;
-          
-          await sendWhatsAppMessage(FONNTE_TARGET_GROUP, msg);
-          updatedCount++;
-        }
-
-        // Notifikasi T waktu 100 Menit (Warning)
-        if (elapsedNetMinutes >= 100 && !flags.notif_100m) {
-          const msg = `⚠️ *Peringatan 100 Menit (Sisa 20 Menit Target)!*\n\nBongkaran KA-${trainNumber} telah berjalan *100 Menit*.\nStatus Kontainer: *${session.unloaded_containers}* Terbongkar, *${122 - session.unloaded_containers}* Sisa.\nHarap optimalkan kecepatan pembongkaran!`;
-          
-          flags.notif_100m = true;
-          updatePayload["flags.notif_100m"] = true;
-          
-          await sendWhatsAppMessage(FONNTE_TARGET_GROUP, msg);
-          updatedCount++;
-        }
-
-        // Notifikasi T waktu 120 Menit (Target Terlampaui - Critical)
-        if (elapsedNetMinutes >= 120 && !flags.notif_120m) {
-          const msg = `🚨 *CRITICAL! Waktu Target Melampaui 120 Menit!*\n\nBongkaran KA-${trainNumber} melebihi batas standar (120 Menit).\nDurasi Bersih saat ini: *${elapsedNetMinutes} Menit*.\nKontainer Terbongkar: *${session.unloaded_containers}/122*.\nButuh eskalasi dan tindakan cepat di lapangan!`;
-          
-          flags.notif_120m = true;
-          updatePayload["flags.notif_120m"] = true;
-          
-          await sendWhatsAppMessage(FONNTE_TARGET_GROUP, msg);
-          updatedCount++;
-        }
-
-        // Notifikasi T waktu 180 Menit (Batas Akhir / Redline)
-        if (elapsedNetMinutes >= 180 && !flags.notif_180m) {
-          const msg = `🛑 *MERAH! Batas Akhir 180 Menit Dilanggar!*\n\nBongkaran KA-${trainNumber} berada di batas merah operasional.\nDurasi Bersih: *${elapsedNetMinutes} Menit*.\nStatus Kontainer: *${session.unloaded_containers}/122*. Checker: ${session.checker_name}`;
-          
-          flags.notif_180m = true;
-          updatePayload["flags.notif_180m"] = true;
-          
-          await sendWhatsAppMessage(FONNTE_TARGET_GROUP, msg);
-          updatedCount++;
-        }
-
-        // --- 3. LOGIKA NOTIFIKASI OVERTIME (INTERVAL 10 MENIT) ---
-        if (elapsedNetMinutes >= 120) {
-          const lastOvertimeNotif = session.last_overtime_notif; // dalam detik
-          const secondsSinceLastNotif = lastOvertimeNotif ? (nowSeconds - lastOvertimeNotif) : null;
-
-          // Jika belum pernah dikirim ATAU selisih >= 10 menit (600 detik)
-          if (lastOvertimeNotif === null || (secondsSinceLastNotif !== null && secondsSinceLastNotif >= 600)) {
-            const msg = `⚠️ *Eskalasi Overtime Berkala! (Setiap 10 Menit)*\n\nBongkaran KA-${trainNumber} telah berjalan *${elapsedNetMinutes} Menit* murni.\nStatus Kontainer: *${session.unloaded_containers}* Terbongkar, *${122 - session.unloaded_containers}* Sisa.\nGroup Leader: *${session.groupleader_name}*\nSegera selesaikan sisa pembongkaran!`;
-            
-            updatePayload.last_overtime_notif = nowSeconds;
-            
-            await sendWhatsAppMessage(FONNTE_TARGET_GROUP, msg);
+          if (messageToSend) {
+            await sendWhatsAppMessage(FONNTE_TARGET_GROUP, messageToSend);
             updatedCount++;
           }
+        } catch (txnError) {
+          console.error(`[Cloud Function] Transaksi gagal pada sesi ${sessionId}:`, txnError);
         }
-
-        // Jalankan update parsial ke Firebase Firestore
-        batch.update(sessionRef, updatePayload);
       }
 
-      await batch.commit();
-      console.log(`[Timer Engine] Evaluasi selesai. Berhasil meng-update status/notif untuk ${updatedCount} trigger.`);
+      console.log(`[Timer Engine] Evaluasi Cloud Function selesai. Berhasil meng-update & mengirim ${updatedCount} notifikasi.`);
     } catch (error) {
       console.error("[Timer Engine] Terjadi kesalahan saat memeriksa sesi:", error);
     }

@@ -14,7 +14,8 @@ import {
   doc, 
   updateDoc, 
   addDoc, 
-  writeBatch 
+  writeBatch,
+  runTransaction
 } from "firebase/firestore";
 
 // Load environment variables dari .env file
@@ -158,6 +159,110 @@ const activeSendingLocks = {
   resumes: new Set<string>()   // Menyimpan string kombinasi id dan alasan: `${id}-${reason}`
 };
 
+/**
+ * Mengirim notifikasi dengan penguncian atomik berbasis transaksi Firestore (Idempotency).
+ * Menjamin 1 pemicu hanya dikirim tepat 1 kali di seluruh platform (Client, Server, Cloud Functions).
+ */
+async function attemptSendNotificationWithLock(
+  sessionId: string, 
+  flagKey: string, 
+  messageBuilder: () => string | Promise<string>
+): Promise<boolean> {
+  const ref = doc(db, "sessions", sessionId);
+  try {
+    let messageToSend = "";
+    const success = await runTransaction(db, async (transaction) => {
+      const docSnap = await transaction.get(ref);
+      if (!docSnap.exists()) {
+        return false;
+      }
+      const data = docSnap.data();
+      const flags = data.flags || {};
+      
+      // Jika flag sudah bernilai true, berarti proses lain sudah mengirimkan pesan ini
+      if (flags[flagKey]) {
+        return false;
+      }
+
+      // Khusus: Jika status sesi dibilang sudah "COMPLETED" dan notifikasi yang dicoba dikirim
+      // adalah notifikasi perjalanan (overtime, 60m, 180m, dll), JANGAN kirim!
+      if (data.status === "COMPLETED" && flagKey !== "notif_completed") {
+        return false;
+      }
+
+      messageToSend = await messageBuilder();
+      
+      // Update flag di database secara atomik dalam transaksi sebelum memicu API luar
+      transaction.update(ref, {
+        [`flags.${flagKey}`]: true
+      });
+      return true;
+    });
+
+    if (success && messageToSend) {
+      console.log(`[Transaction Lock] Mengunci flag: ${flagKey} untuk sesi: ${sessionId}`);
+      await sendFonnteMessage(messageToSend);
+      return true;
+    }
+    return false;
+  } catch (err) {
+    console.error(`[Transaction Lock] Kesalahan memproses lock flag ${flagKey}:`, err);
+    return false;
+  }
+}
+
+/**
+ * Mengirim notifikasi berkala (Overtime) dengan penguncian atomik level interval.
+ */
+async function attemptSendOvertimeIntervalNotificationWithLock(
+  sessionId: string,
+  currentInterval: number,
+  messageBuilder: () => string | Promise<string>
+): Promise<boolean> {
+  const ref = doc(db, "sessions", sessionId);
+  try {
+    let messageToSend = "";
+    const success = await runTransaction(db, async (transaction) => {
+      const docSnap = await transaction.get(ref);
+      if (!docSnap.exists()) {
+        return false;
+      }
+      const data = docSnap.data();
+      
+      // Sesi harus bernilai RUNNING, jika sudah diselesaikan JANGAN mengirim alarm jam tambahan!
+      if (data.status !== "RUNNING") {
+        return false;
+      }
+
+      const lastInterval = data.last_overtime_interval !== undefined && data.last_overtime_interval !== null
+        ? data.last_overtime_interval 
+        : 0;
+      
+      if (lastInterval >= currentInterval) {
+        return false;
+      }
+
+      messageToSend = await messageBuilder();
+      
+      transaction.update(ref, {
+        last_overtime_interval: currentInterval,
+        last_overtime_notif: Math.floor(Date.now() / 1000)
+      });
+      return true;
+    });
+
+    if (success && messageToSend) {
+      console.log(`[Transaction Lock] Mengunci interval berkala (+${currentInterval * 10} mnt) untuk sesi: ${sessionId}`);
+      await sendFonnteMessage(messageToSend);
+      return true;
+    }
+    return false;
+  } catch (err) {
+    console.error(`[Transaction Lock] Kesalahan memproses lock interval ${currentInterval}:`, err);
+    return false;
+  }
+}
+
 let isRunningEngine = false;
 
 /**
@@ -214,54 +319,38 @@ async function runTimerSimulationEngine() {
       // Jika status sesi sudah COMPLETED, periksa apakah notifikasi penyelesaian sudah terkirim atau belum
       if (session.status === "COMPLETED") {
         const flags = session.flags || {};
-        if (!flags.notif_completed && !activeSendingLocks.completed.has(sessionId)) {
-          activeSendingLocks.completed.add(sessionId);
+        if (!flags.notif_completed) {
+          const finalNetSec = session.net_duration_seconds || 0;
+          const finalGrossSec = session.gross_duration_seconds || 0;
+          const finalChecker = session.checker_name || "";
+          const finalGroupLeader = session.groupleader_name || "";
+          const finalTrainNo = formatTrainNumber(session.train_number || "");
+          const finalLogs = session.logs || [];
+
+          const totalDelaySeconds = finalGrossSec - finalNetSec;
+          const totalDelayMinutes = Math.max(0, Math.floor(totalDelaySeconds / 60));
+          const netMinutes = Math.floor(finalNetSec / 60);
+          const grossMinutes = Math.floor(finalGrossSec / 60);
+
+          interface DelayBreakdown { [key: string]: number }
+          const breakdown: DelayBreakdown = {};
           
-          console.log(`[Simulation Engine] Sesi ${sessionId} terdeteksi COMPLETED tetapi belum mengirim notifikasi akhir. Mengirim sekarang...`);
-          
-          try {
-            await updateDoc(ref, {
-              "flags.notif_completed": true
-            });
-
-            const finalNetSec = session.net_duration_seconds || 0;
-            const finalGrossSec = session.gross_duration_seconds || 0;
-            const finalChecker = session.checker_name || "";
-            const finalGroupLeader = session.groupleader_name || "";
-            const finalTrainNo = formatTrainNumber(session.train_number || "");
-            const finalLogs = session.logs || [];
-
-            const totalDelaySeconds = finalGrossSec - finalNetSec;
-            const totalDelayMinutes = Math.max(0, Math.floor(totalDelaySeconds / 60));
-            const netMinutes = Math.floor(finalNetSec / 60);
-            const grossMinutes = Math.floor(finalGrossSec / 60);
-
-            interface DelayBreakdown { [key: string]: number }
-            const breakdown: DelayBreakdown = {};
-            
-            for (let i = 0; i < finalLogs.length; i++) {
-               if (finalLogs[i].type === "PAUSE" && finalLogs[i].reason) {
-                  const reason = finalLogs[i].reason;
-                  const resumeLog = finalLogs.slice(i).find((l: any) => l.type === "RESUME");
-                  const duration = resumeLog?.duration_seconds || 0;
-                  const minutes = Math.floor(duration / 60);
-                  breakdown[reason] = (breakdown[reason] || 0) + minutes;
-               }
-            }
-
-            const detailStrings = Object.entries(breakdown).map(([reason, minutes]) => `${reason} (${minutes} mnt)`);
-            const delayDetails = detailStrings.length > 0 ? detailStrings.join(", ") : "Tidak Ada Delay";
-
-            const msg = `✅ *Bongkaran KA Selesai!*\n\nNomor KA: *${finalTrainNo}*\nSelesai Pada: ${new Date().toLocaleDateString("id-ID", { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' })} WIB\nTarget Waktu: *120 Menit*\n*Net Duration:* ${netMinutes} Menit\n*Gross Duration:* ${grossMinutes} Menit (Total Delay *${totalDelayMinutes} Menit*)\n\n*Rincian Delay:* ${delayDetails}\n\nChecker: *${finalChecker}*\nGroup Leader: *${finalGroupLeader}*`;
-
-            await sendFonnteMessage(msg);
-          } catch (err) {
-            console.error(`[Simulation Engine] Gagal memproses notifikasi selesai otomatis untuk ${sessionId}:`, err);
-          } finally {
-            setTimeout(() => {
-              activeSendingLocks.completed.delete(sessionId);
-            }, 30000);
+          for (let i = 0; i < finalLogs.length; i++) {
+             if (finalLogs[i].type === "PAUSE" && finalLogs[i].reason) {
+                const reason = finalLogs[i].reason;
+                const resumeLog = finalLogs.slice(i).find((l: any) => l.type === "RESUME");
+                const duration = resumeLog?.duration_seconds || 0;
+                const minutes = Math.floor(duration / 60);
+                breakdown[reason] = (breakdown[reason] || 0) + minutes;
+             }
           }
+
+          const detailStrings = Object.entries(breakdown).map(([reason, minutes]) => `${reason} (${minutes} mnt)`);
+          const delayDetails = detailStrings.length > 0 ? detailStrings.join(", ") : "Tidak Ada Delay";
+
+          const msg = `✅ *Bongkaran KA Selesai!*\n\nNomor KA: *${finalTrainNo}*\nSelesai Pada: ${new Date().toLocaleDateString("id-ID", { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' })} WIB\nTarget Waktu: *120 Menit*\n*Net Duration:* ${netMinutes} Menit\n*Gross Duration:* ${grossMinutes} Menit (Total Delay *${totalDelayMinutes} Menit*)\n\n*Rincian Delay:* ${delayDetails}\n\nChecker: *${finalChecker}*\nGroup Leader: *${finalGroupLeader}*`;
+
+          await attemptSendNotificationWithLock(sessionId, "notif_completed", () => msg);
         }
         continue;
       }
@@ -314,9 +403,7 @@ async function runTimerSimulationEngine() {
         // --- FLAG TRIGGERS (ANTI-SPAM GATE) ---
 
         // A. Notifikasi Mulai (Fase 1)
-        if (!flags.notif_start && !activeSendingLocks.start.has(sessionId)) {
-          activeSendingLocks.start.add(sessionId);
-
+        if (!flags.notif_start) {
           const formatJktTime = (timestampSeconds: number) => {
             return new Date(timestampSeconds * 1000).toLocaleTimeString("id-ID", {
               timeZone: "Asia/Jakarta",
@@ -337,15 +424,7 @@ async function runTimerSimulationEngine() {
             `Target Selesai: *${targetTimeStr}* (120 Menit / 122 Kontainer)\n` +
             `Batas Akhir: *${limitTimeStr}* (180 Menit)`;
           
-          await updateDoc(ref, {
-            ...updatePayload,
-            "flags.notif_start": true
-          });
-          await sendFonnteMessage(msg);
-          
-          setTimeout(() => {
-            activeSendingLocks.start.delete(sessionId);
-          }, 30000);
+          await attemptSendNotificationWithLock(sessionId, "notif_start", () => msg);
           continue;
         }
 
@@ -353,11 +432,7 @@ async function runTimerSimulationEngine() {
         if (elapsedNetMinutes >= 60 && !flags.notif_60m) {
           const msg = `⏳ *Info 60 Menit Bongkaran ${trainNo}*\n\nSiklus bongkaran telah berjalan 60 menit bersih.\nKontainer Terbongkar: *${session.unloaded_containers}/122*.\nChecker: *${session.checker_name}*`;
           
-          await updateDoc(ref, {
-            ...updatePayload,
-            "flags.notif_60m": true
-          });
-          await sendFonnteMessage(msg);
+          await attemptSendNotificationWithLock(sessionId, "notif_60m", () => msg);
           continue;
         }
 
@@ -365,11 +440,7 @@ async function runTimerSimulationEngine() {
         if (elapsedNetMinutes >= 100 && !flags.notif_100m) {
           const msg = `⚠️ *Peringatan 100 Menit (Sisa 20 Menit Target)!*\n\nBongkaran ${trainNo} telah berjalan *100 Menit*.\nStatus Kontainer: *${session.unloaded_containers}* Terbongkar, *${122 - session.unloaded_containers}* Sisa.\nHarap tingkatkan koordinasi operasional!`;
           
-          await updateDoc(ref, {
-            ...updatePayload,
-            "flags.notif_100m": true
-          });
-          await sendFonnteMessage(msg);
+          await attemptSendNotificationWithLock(sessionId, "notif_100m", () => msg);
           continue;
         }
 
@@ -377,11 +448,7 @@ async function runTimerSimulationEngine() {
         if (elapsedNetMinutes >= 110 && !flags.notif_110m) {
           const msg = `⚠️ *Peringatan 110 Menit (Sisa 10 Menit Target)!*\n\nBongkaran ${trainNo} mendekati batas target standar (Sisa 10 Menit).\nStatus Kontainer: *${session.unloaded_containers}/122* Terbongkar.\nHarap optimalkan kecepatan pembongkaran!`;
           
-          await updateDoc(ref, {
-            ...updatePayload,
-            "flags.notif_110m": true
-          });
-          await sendFonnteMessage(msg);
+          await attemptSendNotificationWithLock(sessionId, "notif_110m", () => msg);
           continue;
         }
 
@@ -389,12 +456,10 @@ async function runTimerSimulationEngine() {
         if (elapsedNetMinutes >= 120 && !flags.notif_120m) {
           const msg = `🚨 *CRITICAL! Waktu Target Melampaui 120 Menit!*\n\nBongkaran ${trainNo} melebihi batas standar (120 Menit).\nDurasi Bersih saat ini: *${elapsedNetMinutes} Menit*.\nKontainer Terbongkar: *${session.unloaded_containers}/122*.\nButuh eskalasi cepat di lapangan!`;
           
-          await updateDoc(ref, {
-            ...updatePayload,
-            "flags.notif_120m": true,
-            "last_overtime_notif": nowSeconds
-          });
-          await sendFonnteMessage(msg);
+          await attemptSendNotificationWithLock(sessionId, "notif_120m", () => msg);
+          try {
+            await updateDoc(ref, { last_overtime_notif: nowSeconds });
+          } catch (e) {}
           continue;
         }
 
@@ -402,11 +467,7 @@ async function runTimerSimulationEngine() {
         if (elapsedNetMinutes >= 180 && !flags.notif_180m) {
           const msg = `🛑 *MERAH! Batas Akhir 180 Menit Dilanggar!*\n\nBongkaran ${trainNo} berada di batas merah operasional.\nDurasi Bersih: *${elapsedNetMinutes} Menit*.\nStatus Kontainer: *${session.unloaded_containers}/122*. Checker: *${session.checker_name}*`;
           
-          await updateDoc(ref, {
-            ...updatePayload,
-            "flags.notif_180m": true
-          });
-          await sendFonnteMessage(msg);
+          await attemptSendNotificationWithLock(sessionId, "notif_180m", () => msg);
           continue;
         }
 
@@ -421,12 +482,7 @@ async function runTimerSimulationEngine() {
           if (currentInterval > lastOvertimeInterval) {
             const msg = `⚠️ *Peringatan Overtime Berkala! Durasi Melebihi Target (+${currentInterval * 10} Menit)*\n\nBongkaran ${trainNo} telah melebihi target waktu standar.\nDurasi murni saat ini: *${elapsedNetMinutes} Menit* murni.\nStatus Kontainer: *${session.unloaded_containers}/122* Terbongkar.\nChecker: *${session.checker_name}*\nGroup Leader: *${session.groupleader_name}*`;
             
-            await updateDoc(ref, {
-              ...updatePayload,
-              "last_overtime_interval": currentInterval,
-              "last_overtime_notif": nowSeconds
-            });
-            await sendFonnteMessage(msg);
+            await attemptSendOvertimeIntervalNotificationWithLock(sessionId, currentInterval, () => msg);
             continue;
           }
         }
