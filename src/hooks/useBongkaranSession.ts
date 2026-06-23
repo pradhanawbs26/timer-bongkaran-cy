@@ -216,66 +216,12 @@ export function useBongkaranSession(sessionId: string | null) {
     if (currentUnloaded >= session.total_containers) return;
 
     const nextValue = Math.min(currentUnloaded + amount, session.total_containers);
-    const isNowCompleted = nextValue === session.total_containers;
-
     const docRef = doc(db, "sessions", sessionId);
     
     // Update data di Firestore secara atomic
-    const updatePayload: Partial<UnloadingSession> = {
-      unloaded_containers: nextValue,
-    };
-
-    // Jika mencapai target 122kontainer secara otomatis ganti status ke COMPLETED
-    if (isNowCompleted) {
-      const nowSeconds = Math.floor(Date.now() / 1000);
-      // Hitung final durations
-      const elapsedGross = nowSeconds - session.start_timestamp;
-      let totalPausedDuration = 0;
-      session.logs.forEach((l) => {
-        if (l.type === "RESUME" && l.duration_seconds) {
-          totalPausedDuration += l.duration_seconds;
-        }
-      });
-      if (session.status === "PAUSED" && session.last_paused_timestamp) {
-        totalPausedDuration += (nowSeconds - session.last_paused_timestamp);
-      }
-      const elapsedNet = elapsedGross - totalPausedDuration;
-
-      updatePayload.status = "COMPLETED";
-      updatePayload.net_duration_seconds = elapsedNet;
-      updatePayload.gross_duration_seconds = elapsedGross;
-      updatePayload["flags.notif_completed"] = false;
-    }
-
-    await updateDoc(docRef, updatePayload);
-
-    // Jika mencapai target, beralih langsung dan kirim notifikasi selesai
-    if (isNowCompleted) {
-      const payload = {
-        net_duration_seconds: updatePayload.net_duration_seconds,
-        gross_duration_seconds: updatePayload.gross_duration_seconds,
-        unloaded_containers: nextValue,
-        checker_name: session.checker_name,
-        groupleader_name: session.groupleader_name,
-        train_number: session.train_number,
-        logs: session.logs
-      };
-
-      fetch(`/api/sessions/${sessionId}/complete-notif`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(payload)
-      })
-      .then(async (res) => {
-        if (!res.ok) throw new Error(`API returned ${res.status}`);
-      })
-      .catch((err) => {
-        console.warn("Gagal mengirim notif autoselesai via API, mencoba fallback client-side:", err);
-        import("../utils/whatsappNotification").then(({ triggerCompleteNotificationClient }) => {
-          triggerCompleteNotificationClient(payload);
-        });
-      });
-    }
+    await updateDoc(docRef, {
+      unloaded_containers: nextValue
+    });
   }, [session, sessionId]);
 
   // Kurang jumlah kontainer (-)

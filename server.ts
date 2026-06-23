@@ -160,6 +160,10 @@ async function sendFonnteMessage(message: string): Promise<void> {
   } catch (err) {
     console.error("Gagal menambahkan log Fonnte ke Firestore:", err);
   }
+
+  if (!success) {
+    throw new Error(`Seluruh protokol Fonnte gagal mengirim pesan. Status log terakhir: ${dbLogStatus}`);
+  }
 }
 
 /**
@@ -227,8 +231,20 @@ async function attemptSendNotificationWithLock(
 
     if (success && messageToSend) {
       console.log(`[Transaction Lock] Mengunci flag: ${flagKey} untuk sesi: ${sessionId}`);
-      await sendFonnteMessage(messageToSend);
-      return true;
+      try {
+        await sendFonnteMessage(messageToSend);
+        return true;
+      } catch (sendErr) {
+        console.error(`[Transaction Lock] Gagal mengirim pesan ke Fonnte, me-revert flag ${flagKey}:`, sendErr);
+        try {
+          await updateDoc(ref, {
+            [`flags.${flagKey}`]: false
+          });
+        } catch (revertErr) {
+          console.error(`[Transaction Lock] Gagal me-revert flag ${flagKey}:`, revertErr);
+        }
+        return false;
+      }
     }
     return false;
   } catch (err) {
@@ -279,8 +295,21 @@ async function attemptSendOvertimeIntervalNotificationWithLock(
 
     if (success && messageToSend) {
       console.log(`[Transaction Lock] Mengunci interval berkala (+${currentInterval * 10} mnt) untuk sesi: ${sessionId}`);
-      await sendFonnteMessage(messageToSend);
-      return true;
+      try {
+        await sendFonnteMessage(messageToSend);
+        return true;
+      } catch (sendErr) {
+        console.error(`[Transaction Lock] Gagal mengirim pesan ke Fonnte, me-revert interval ${currentInterval}:`, sendErr);
+        try {
+          await updateDoc(ref, {
+            last_overtime_interval: currentInterval - 1,
+            last_overtime_notif: null
+          });
+        } catch (revertErr) {
+          console.error(`[Transaction Lock] Gagal me-revert interval:`, revertErr);
+        }
+        return false;
+      }
     }
     return false;
   } catch (err) {

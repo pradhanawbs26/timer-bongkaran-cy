@@ -207,6 +207,7 @@ export default function UnloadingMonitor({
       await onFinish();
       
       const payload = {
+        session_id: session.session_id,
         net_duration_seconds: liveNetSeconds,
         gross_duration_seconds: liveGrossSeconds,
         unloaded_containers: session.unloaded_containers,
