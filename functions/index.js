@@ -25,8 +25,8 @@ if (admin.apps.length === 0) {
  * firebase functions:secrets:set FONNTE_API_KEY=KunciAndaDisini
  * firebase functions:secrets:set FONNTE_TARGET_GROUP=NomorGrupWhatsApp
  */
-const FONNTE_API_KEY = process.env.FONNTE_API_KEY || "iNfrBRnqQj4izhPo4PKL";
-const FONNTE_TARGET_GROUP = process.env.FONNTE_TARGET_GROUP || "628117882902-1623340497@g.us";
+const FONNTE_API_KEY = process.env.FONNTE_API_KEY || process.env.VITE_FONNTE_API_KEY || "iNfrBRnqQj4izhPo4PKL";
+const FONNTE_TARGET_GROUP = process.env.FONNTE_TARGET_GROUP || process.env.VITE_FONNTE_TARGET_GROUP || "628117882902-1623340497@g.us";
 
 /**
  * Fungsi Pembantu untuk Mengirim WhatsApp menggunakan Fonnte API

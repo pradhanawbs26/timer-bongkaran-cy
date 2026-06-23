@@ -55,8 +55,8 @@ app.get("/api/get-firebase-mode", (req, res) => {
  * agar dapat dipantau di UI Dashboard secara langsung oleh user.
  */
 async function sendFonnteMessage(message: string): Promise<void> {
-  const activeApiKey = process.env.FONNTE_API_KEY || "iNfrBRnqQj4izhPo4PKL";
-  const activeTargetGroup = process.env.FONNTE_TARGET_GROUP || "628117882902-1623340497@g.us";
+  const activeApiKey = process.env.FONNTE_API_KEY || process.env.VITE_FONNTE_API_KEY || "iNfrBRnqQj4izhPo4PKL";
+  const activeTargetGroup = process.env.FONNTE_TARGET_GROUP || process.env.VITE_FONNTE_TARGET_GROUP || "628117882902-1623340497@g.us";
 
   console.log(`[Fonnte Service] Mengirim Pesan WhatsApp:\nTarget: ${activeTargetGroup}\n--- START MESSAGE ---\n${message}\n--- END MESSAGE ---`);
 
@@ -280,7 +280,7 @@ async function runTimerSimulationEngine() {
 
   try {
     const sessionsRef = collection(db, "sessions");
-    const q = query(sessionsRef, where("status", "in", ["RUNNING", "PAUSED", "COMPLETED"]));
+    const q = query(sessionsRef, where("status", "in", ["RUNNING", "PAUSED"]));
     const querySnapshot = await getDocs(q);
 
     const nowSeconds = Math.floor(Date.now() / 1000);
@@ -574,13 +574,24 @@ app.post("/api/sessions/:id/start-notif", async (req, res) => {
     }
     activeSendingLocks.start.add(id);
 
-    const snapshot = await getDocs(query(collection(db, "sessions"), where("session_id", "==", id)));
-    if (snapshot.empty) {
+    let session: any = null;
+    let docId = id;
+    const docSnap = await getDoc(doc(db, "sessions", id));
+
+    if (docSnap.exists()) {
+      session = docSnap.data();
+    } else {
+      const snapshot = await getDocs(query(collection(db, "sessions"), where("session_id", "==", id)));
+      if (!snapshot.empty) {
+        session = snapshot.docs[0].data();
+        docId = snapshot.docs[0].id;
+      }
+    }
+
+    if (!session) {
       activeSendingLocks.start.delete(id);
       return res.status(404).json({ error: "Sesi tidak ditemukan" });
     }
-    const session = snapshot.docs[0].data();
-    const docId = snapshot.docs[0].id;
 
     const trainNo = formatTrainNumber(session.train_number);
     const formatJktTime = (timestampSeconds: number) => {
@@ -777,12 +788,22 @@ app.post("/api/sessions/:id/pause-notif", async (req, res) => {
     }
     activeSendingLocks.pauses.add(lockKey);
 
-    const snapshot = await getDocs(query(collection(db, "sessions"), where("session_id", "==", id)));
-    if (snapshot.empty) {
+    let session: any = null;
+    const docSnap = await getDoc(doc(db, "sessions", id));
+
+    if (docSnap.exists()) {
+      session = docSnap.data();
+    } else {
+      const snapshot = await getDocs(query(collection(db, "sessions"), where("session_id", "==", id)));
+      if (!snapshot.empty) {
+        session = snapshot.docs[0].data();
+      }
+    }
+
+    if (!session) {
       activeSendingLocks.pauses.delete(lockKey);
       return res.status(404).json({ error: "Sesi tidak ditemukan" });
     }
-    const session = snapshot.docs[0].data();
     
     const nowJkt = new Date().toLocaleTimeString("id-ID", {
       timeZone: "Asia/Jakarta",
@@ -820,12 +841,22 @@ app.post("/api/sessions/:id/resume-notif", async (req, res) => {
     }
     activeSendingLocks.resumes.add(lockKey);
 
-    const snapshot = await getDocs(query(collection(db, "sessions"), where("session_id", "==", id)));
-    if (snapshot.empty) {
+    let session: any = null;
+    const docSnap = await getDoc(doc(db, "sessions", id));
+
+    if (docSnap.exists()) {
+      session = docSnap.data();
+    } else {
+      const snapshot = await getDocs(query(collection(db, "sessions"), where("session_id", "==", id)));
+      if (!snapshot.empty) {
+        session = snapshot.docs[0].data();
+      }
+    }
+
+    if (!session) {
       activeSendingLocks.resumes.delete(lockKey);
       return res.status(404).json({ error: "Sesi tidak ditemukan" });
     }
-    const session = snapshot.docs[0].data();
     
     const durationMinutes = Math.floor((duration_seconds || 0) / 60);
 
