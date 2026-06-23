@@ -1,5 +1,5 @@
 import { db } from "../firebaseClient";
-import { collection, addDoc, doc, getDoc } from "firebase/firestore";
+import { collection, addDoc, doc, getDoc, runTransaction } from "firebase/firestore";
 import { UnloadingSession } from "../types";
 
 /**
@@ -229,5 +229,138 @@ export async function triggerRevisionNotificationClient(
     `Alasan Revisi: *${reason || "Terlewat start timer"}*`;
 
   await sendFonnteMessageClient(msg);
+}
+
+/**
+ * Client-side fallback: Mengirim notifikasi berkala/milestone dengan penguncian atomik level transaksi di Firestore.
+ */
+export async function attemptSendNotificationWithLockClient(
+  sessionId: string,
+  flagKey: string,
+  milestone: string,
+  elapsedNetMinutes: number
+): Promise<boolean> {
+  const ref = doc(db, "sessions", sessionId);
+  try {
+    let messageToSend = "";
+    const success = await runTransaction(db, async (transaction) => {
+      const docSnap = await transaction.get(ref);
+      if (!docSnap.exists()) {
+        return false;
+      }
+      const data = docSnap.data();
+      const flags = data.flags || {};
+      
+      // Jika flag sudah bernilai true, berarti proses lain sudah mengirimkan pesan ini
+      if (flags[flagKey]) {
+        return false;
+      }
+
+      // Sesi harus belum dalam status COMPLETED
+      if (data.status === "COMPLETED" && flagKey !== "notif_completed") {
+        return false;
+      }
+
+      const trainNo = formatTrainNumber(data.train_number);
+
+      switch (milestone) {
+        case "60m":
+          messageToSend = `⏳ *Info 60 Menit Bongkaran ${trainNo}*\n\nSiklus bongkaran telah berjalan 60 menit bersih.\nKontainer Terbongkar: *${data.unloaded_containers || 0}/122*.\nChecker: *${data.checker_name}*`;
+          break;
+        case "100m":
+          messageToSend = `⚠️ *Peringatan 100 Menit (Sisa 20 Menit Target)!*\n\nBongkaran ${trainNo} telah berjalan *100 Menit*.\nStatus Kontainer: *${data.unloaded_containers || 0}* Terbongkar, *${122 - (data.unloaded_containers || 0)}* Sisa.\nHarap tingkatkan koordinasi operasional!`;
+          break;
+        case "110m":
+          messageToSend = `⚠️ *Peringatan 110 Menit (Sisa 10 Menit Target)!*\n\nBongkaran ${trainNo} mendekati batas target standar (Sisa 10 Menit).\nStatus Kontainer: *${data.unloaded_containers || 0}/122* Terbongkar.\nHarap optimalkan kecepatan pembongkaran!`;
+          break;
+        case "120m":
+          messageToSend = `🚨 *CRITICAL! Waktu Target Melampaui 120 Menit!*\n\nBongkaran ${trainNo} melebihi batas standar (120 Menit).\nDurasi Bersih saat ini: *${elapsedNetMinutes > 0 ? elapsedNetMinutes : 120} Menit*.\nKontainer Terbongkar: *${data.unloaded_containers || 0}/122*.\nButuh eskalasi cepat di lapangan!`;
+          break;
+        case "180m":
+          messageToSend = `🛑 *MERAH! Batas Akhir 180 Menit Dilanggar!*\n\nBongkaran ${trainNo} berada di batas merah operasional.\nDurasi Bersih: *${elapsedNetMinutes > 0 ? elapsedNetMinutes : 180} Menit*.\nStatus Kontainer: *${data.unloaded_containers || 0}/122*. Checker: *${data.checker_name}*`;
+          break;
+        default:
+          return false;
+      }
+      
+      // Update flag di database secara atomik dalam transaksi sebelum memicu API luar
+      transaction.update(ref, {
+        [`flags.${flagKey}`]: true
+      });
+      return true;
+    });
+
+    if (success && messageToSend) {
+      console.log(`[Client Transaction Lock] Mengunci flag: ${flagKey} untuk sesi: ${sessionId}`);
+      await sendFonnteMessageClient(messageToSend);
+      return true;
+    }
+    return false;
+  } catch (err) {
+    console.error(`[Client Transaction Lock] Kesalahan memproses lock flag ${flagKey}:`, err);
+    return false;
+  }
+}
+
+/**
+ * Client-side fallback: Mengirim alarm OT berkala dengan penguncian atomik interval transaksi di Firestore.
+ */
+export async function attemptSendOvertimeIntervalNotificationWithLockClient(
+  sessionId: string,
+  currentInterval: number
+): Promise<boolean> {
+  const ref = doc(db, "sessions", sessionId);
+  try {
+    let messageToSend = "";
+    const success = await runTransaction(db, async (transaction) => {
+      const docSnap = await transaction.get(ref);
+      if (!docSnap.exists()) {
+        return false;
+      }
+      const data = docSnap.data();
+      
+      // Sesi harus bernilai RUNNING
+      if (data.status !== "RUNNING") {
+        return false;
+      }
+
+      const lastInterval = data.last_overtime_interval !== undefined && data.last_overtime_interval !== null
+        ? data.last_overtime_interval 
+        : 0;
+      
+      if (lastInterval >= currentInterval) {
+        return false;
+      }
+
+      const trainNo = formatTrainNumber(data.train_number);
+      const elapsedGross = Math.floor(Date.now() / 1000) - data.start_timestamp;
+      let totalPausedSeconds = 0;
+      const logs = data.logs || [];
+      logs.forEach((log: any) => {
+        if (log.type === "RESUME" && log.duration_seconds) {
+          totalPausedSeconds += log.duration_seconds;
+        }
+      });
+      const elapsedNet = elapsedGross - totalPausedSeconds;
+      const elapsedNetMinutes = Math.floor(elapsedNet / 60);
+
+      messageToSend = `⚠️ *Peringatan Overtime Berkala! Durasi Melebihi Target (+${currentInterval * 10} Menit)*\n\nBongkaran ${trainNo} telah melebihi target waktu standar.\nDurasi murni saat ini: *${elapsedNetMinutes > 0 ? elapsedNetMinutes : 120 + currentInterval * 10} Menit* murni.\nStatus Kontainer: *${data.unloaded_containers || 0}/122* Terbongkar.\nChecker: *${data.checker_name}*\nGroup Leader: *${data.groupleader_name}*`;
+      
+      transaction.update(ref, {
+        last_overtime_interval: currentInterval,
+        last_overtime_notif: Math.floor(Date.now() / 1000)
+      });
+      return true;
+    });
+
+    if (success && messageToSend) {
+      await sendFonnteMessageClient(messageToSend);
+      return true;
+    }
+    return false;
+  } catch (err) {
+    console.error(`[Client Overtime Lock] Kesalahan memproses lock interval ${currentInterval}:`, err);
+    return false;
+  }
 }
 

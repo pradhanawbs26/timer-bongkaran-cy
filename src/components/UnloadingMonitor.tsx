@@ -224,7 +224,9 @@ export default function UnloadingMonitor({
         });
         if (!res.ok) throw new Error(`API returned ${res.status}`);
       } catch (err) {
-        console.warn("Gagal mengirim notif penyelesaian via API:", err);
+        console.warn("Gagal mengirim notif penyelesaian via API, mencoba fallback client-side:", err);
+        const { triggerCompleteNotificationClient } = await import("../utils/whatsappNotification");
+        triggerCompleteNotificationClient(payload);
       }
     } catch (e) {
       console.error("Gagal menyelesaikan sesi:", e);

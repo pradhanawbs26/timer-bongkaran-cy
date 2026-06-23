@@ -112,7 +112,15 @@ export default function InitializeSession({ onStart }: InitializeSessionProps) {
           if (!res.ok) throw new Error(`API returned ${res.status}`);
         })
         .catch((err) => {
-          console.warn("Gagal mengirim notif mulai via API:", err);
+          console.warn("Gagal mengirim notif mulai via API, mencoba fallback client-side:", err);
+          import("../utils/whatsappNotification").then(({ triggerStartNotificationClient }) => {
+            triggerStartNotificationClient({
+              train_number: formattedTrainNumber,
+              checker_name: checkerName.trim(),
+              groupleader_name: groupLeaderName.trim(),
+              start_timestamp: Math.floor(Date.now() / 1000)
+            });
+          });
         });
       } else {
         setErrorMessage("Gagal menginisialisasi sesi di cloud database.");

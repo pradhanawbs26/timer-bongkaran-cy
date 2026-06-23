@@ -180,13 +180,31 @@ export function useBongkaranSession(sessionId: string | null) {
         })
       })
       .then(async (res) => {
+        if (!res.ok) throw new Error(`API returned status ${res.status}`);
         const data = await res.json();
         console.log(`[Client Trigger] Hasil pemicuan milestone ${lockKey}:`, data);
       })
-      .catch((err) => {
-        console.error(`[Client Trigger] Gagal pemicuan milestone ${lockKey}:`, err);
-        // Lepas lock lokal agar dapat dicoba lagi jika ada kendala jaringan transient
-        clientPushedFlagsRef.current[lockKey] = false;
+      .catch(async (err) => {
+        console.warn(`[Client Trigger] Gagal pemicuan milestone ${lockKey} via API, menjalankan fallback client-side aman:`, err);
+        try {
+          const { 
+            attemptSendNotificationWithLockClient, 
+            attemptSendOvertimeIntervalNotificationWithLockClient 
+          } = await import("../utils/whatsappNotification");
+
+          if (milestoneToTrigger === "overtime") {
+            const success = await attemptSendOvertimeIntervalNotificationWithLockClient(sessionId, otInterval);
+            console.log(`[Client Fallback] Overtime milestone ${otInterval} success:`, success);
+          } else if (milestoneToTrigger) {
+            const flagKey = `notif_${milestoneToTrigger}`;
+            const success = await attemptSendNotificationWithLockClient(sessionId, flagKey, milestoneToTrigger, netMinutes);
+            console.log(`[Client Fallback] Milestone ${milestoneToTrigger} success:`, success);
+          }
+        } catch (fallbackErr) {
+          console.error("[Client Fallback] Gagal memproses fallback milestone:", fallbackErr);
+          // Lepas lock lokal agar dapat dicoba lagi di tick berikutnya jika gagal di sisi client juga
+          clientPushedFlagsRef.current[lockKey] = false;
+        }
       });
     }
   }, [sessionId, session, liveNetSeconds]);
@@ -251,7 +269,10 @@ export function useBongkaranSession(sessionId: string | null) {
         if (!res.ok) throw new Error(`API returned ${res.status}`);
       })
       .catch((err) => {
-        console.warn("Gagal mengirim notif autoselesai via API:", err);
+        console.warn("Gagal mengirim notif autoselesai via API, mencoba fallback client-side:", err);
+        import("../utils/whatsappNotification").then(({ triggerCompleteNotificationClient }) => {
+          triggerCompleteNotificationClient(payload);
+        });
       });
     }
   }, [session, sessionId]);
@@ -302,7 +323,10 @@ export function useBongkaranSession(sessionId: string | null) {
       if (!res.ok) throw new Error(`API returned ${res.status}`);
     })
     .catch((err) => {
-      console.warn("Gagal mengirim pause notif via API:", err);
+      console.warn("Gagal mengirim pause notif via API, mencoba fallback client-side:", err);
+      import("../utils/whatsappNotification").then(({ triggerPauseNotificationClient }) => {
+        triggerPauseNotificationClient(session, reason);
+      });
     });
   }, [session, sessionId]);
 
@@ -343,7 +367,10 @@ export function useBongkaranSession(sessionId: string | null) {
       if (!res.ok) throw new Error(`API returned ${res.status}`);
     })
     .catch((err) => {
-      console.warn("Gagal mengirim resume notif via API:", err);
+      console.warn("Gagal mengirim resume notif via API, mencoba fallback client-side:", err);
+      import("../utils/whatsappNotification").then(({ triggerResumeNotificationClient }) => {
+        triggerResumeNotificationClient(session, reason, delayDuration);
+      });
     });
   }, [session, sessionId]);
 
@@ -422,7 +449,10 @@ export function useBongkaranSession(sessionId: string | null) {
       if (!res.ok) throw new Error(`API returned ${res.status}`);
     })
     .catch((err) => {
-      console.error("Gagal mengirim notif revisi WA via API:", err);
+      console.error("Gagal mengirim notif revisi WA via API, mencoba fallback client-side:", err);
+      import("../utils/whatsappNotification").then(({ triggerRevisionNotificationClient }) => {
+        triggerRevisionNotificationClient(session, oldStartTimestamp, newStartTimestamp, reason);
+      });
     });
   }, [session, sessionId]);
 

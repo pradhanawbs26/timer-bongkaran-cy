@@ -121,23 +121,43 @@ export default function FonnteLiveFeed() {
     setTestStatus(null);
 
     try {
-      const res = await fetch("/api/test-fonnte", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ message: testMessage.trim() })
-      });
+      let isSuccess = false;
+      try {
+        const res = await fetch("/api/test-fonnte", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ message: testMessage.trim() })
+        });
 
-      const data = await res.json();
-      if (res.ok && data.success) {
-        setTestStatus({
-          success: true,
-          message: "Pesan uji coba berhasil dipicu! Silakan pantau daftar streaming log di bawah."
-        });
-      } else {
-        setTestStatus({
-          success: false,
-          message: data.error || "Gagal memicu pengiriman pesan."
-        });
+        if (res.ok) {
+          const data = await res.json();
+          if (data.success) {
+            setTestStatus({
+              success: true,
+              message: "Pesan uji coba berhasil dipicu lewat Server backend! Silakan pantau log di bawah."
+            });
+            isSuccess = true;
+          }
+        }
+      } catch (backendErr) {
+        console.warn("Backend test-fonnte failed, trying client-side fallback direct sending...", backendErr);
+      }
+
+      if (!isSuccess) {
+        // Fallback: Kirim secara langsung dari browser client-side
+        const { sendFonnteMessageClient } = await import("../utils/whatsappNotification");
+        const clientSuccess = await sendFonnteMessageClient(testMessage.trim());
+        if (clientSuccess) {
+          setTestStatus({
+            success: true,
+            message: "Pesan uji coba berhasil dikirim langsung dari Browser Anda (Bypass Serverless Vercel)!"
+          });
+        } else {
+          setTestStatus({
+            success: false,
+            message: "Gagal mengirim pesan uji coba baik lewat Server maupun langsung dari Browser."
+          });
+        }
       }
     } catch (err: any) {
       console.error("Kesalahan koneksi pengujian:", err);
