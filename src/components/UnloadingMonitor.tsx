@@ -251,8 +251,9 @@ export default function UnloadingMonitor({
 
   // Jam targets computed
   const jamMulai = formatJktHours(session.start_timestamp);
-  const jamTargetSelesai = formatJktHours(session.start_timestamp + 120 * 60);
-  const jamBatasAkhir = formatJktHours(session.start_timestamp + 180 * 60);
+  const totalPaused = Math.max(0, liveGrossSeconds - liveNetSeconds);
+  const jamTargetSelesai = formatJktHours(session.start_timestamp + 120 * 60 + totalPaused);
+  const jamBatasAkhir = formatJktHours(session.start_timestamp + 180 * 60 + totalPaused);
 
   return (
     <div className={`space-y-4 sm:space-y-5 max-w-xl mx-auto pb-10 transition-all duration-500 ${netMinutes >= 120 ? 'ring-4 ring-rose-500/20 dark:ring-rose-500/10 rounded-3xl p-1 bg-rose-50/10' : ''}`}>

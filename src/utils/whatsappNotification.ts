@@ -117,84 +117,266 @@ export async function sendFonnteMessageClient(message: string): Promise<boolean>
 }
 
 export async function triggerStartNotificationClient(session: UnloadingSession | any): Promise<void> {
-  const trainNo = formatTrainNumber(session.train_number);
-  const formatJktTime = (timestampSeconds: number) => {
-    return new Date(timestampSeconds * 1000).toLocaleTimeString("id-ID", {
+  const sessionId = session.session_id;
+  if (!sessionId) {
+    console.warn("[Client Start Fallback] session_id tidak terdefinisi, lewatkan locking.");
+    const trainNo = formatTrainNumber(session.train_number);
+    const formatJktTime = (timestampSeconds: number) => {
+      return new Date(timestampSeconds * 1000).toLocaleTimeString("id-ID", {
+        timeZone: "Asia/Jakarta",
+        hour: "2-digit",
+        minute: "2-digit",
+        hour12: false
+      }) + " WIB";
+    };
+    const startTimeStr = formatJktTime(session.start_timestamp);
+    const targetTimeStr = formatJktTime(session.start_timestamp + 120 * 60);
+    const limitTimeStr = formatJktTime(session.start_timestamp + 180 * 60);
+    const msg = `📢 *Bongkaran KA Dimulai*\n\n` +
+      `KA Nomor: *${trainNo}*\n` +
+      `Checker: *${session.checker_name}*\n` +
+      `Group Leader: *${session.groupleader_name || "-"}*\n` +
+      `Waktu Mulai: *${startTimeStr}*\n` +
+      `Target Selesai: *${targetTimeStr}* (120 Menit / 122 Kontainer)\n` +
+      `Batas Akhir: *${limitTimeStr}* (180 Menit)`;
+    await sendFonnteMessageClient(msg);
+    return;
+  }
+
+  const ref = doc(db, "sessions", sessionId);
+  try {
+    let messageToSend = "";
+    const success = await runTransaction(db, async (transaction) => {
+      const docSnap = await transaction.get(ref);
+      if (!docSnap.exists()) return false;
+      const data = docSnap.data();
+      const flags = data.flags || {};
+      if (flags.notif_start) return false; // Sudah dikirim!
+
+      const trainNo = formatTrainNumber(data.train_number || session.train_number);
+      const formatJktTime = (timestampSeconds: number) => {
+        return new Date(timestampSeconds * 1000).toLocaleTimeString("id-ID", {
+          timeZone: "Asia/Jakarta",
+          hour: "2-digit",
+          minute: "2-digit",
+          hour12: false
+        }) + " WIB";
+      };
+
+      const startTimeStr = formatJktTime(data.start_timestamp || session.start_timestamp);
+      const targetTimeStr = formatJktTime((data.start_timestamp || session.start_timestamp) + 120 * 60);
+      const limitTimeStr = formatJktTime((data.start_timestamp || session.start_timestamp) + 180 * 60);
+
+      messageToSend = `📢 *Bongkaran KA Dimulai*\n\n` +
+        `KA Nomor: *${trainNo}*\n` +
+        `Checker: *${data.checker_name || session.checker_name}*\n` +
+        `Group Leader: *${data.groupleader_name || session.groupleader_name || "-"}*\n` +
+        `Waktu Mulai: *${startTimeStr}*\n` +
+        `Target Selesai: *${targetTimeStr}* (120 Menit / 122 Kontainer)\n` +
+        `Batas Akhir: *${limitTimeStr}* (180 Menit)`;
+
+      transaction.update(ref, {
+        "flags.notif_start": true
+      });
+      return true;
+    });
+
+    if (success && messageToSend) {
+      await sendFonnteMessageClient(messageToSend);
+    } else {
+      console.log("[Client Start Fallback] Notifikasi dilewati karena sudah terkirim oleh sistem utama.");
+    }
+  } catch (err) {
+    console.error("[Client Start Fallback Lock] Gagal:", err);
+  }
+}
+
+export async function triggerPauseNotificationClient(session: UnloadingSession | any, reason: string, timestamp?: number): Promise<void> {
+  const sessionId = session.session_id;
+  if (!sessionId) {
+    console.warn("[Client Pause Fallback] session_id tidak terdefinisi, lewatkan locking.");
+    const nowJkt = new Date().toLocaleTimeString("id-ID", {
       timeZone: "Asia/Jakarta",
       hour: "2-digit",
       minute: "2-digit",
       hour12: false
     }) + " WIB";
-  };
-  
-  const startTimeStr = formatJktTime(session.start_timestamp);
-  const targetTimeStr = formatJktTime(session.start_timestamp + 120 * 60);
-  const limitTimeStr = formatJktTime(session.start_timestamp + 180 * 60);
+    const trainNo = formatTrainNumber(session.train_number);
+    const msg = `⏳ *Delay Bongkaran ${trainNo} Dimulai*\n\nAlasan Delay: *${reason}*\nWaktu Mulai Delay: *${nowJkt}*\nJumlah Terbongkar: *${session.unloaded_containers}/122*\nChecker: *${session.checker_name}*`;
+    await sendFonnteMessageClient(msg);
+    return;
+  }
 
-  const msg = `📢 *Bongkaran KA Dimulai*\n\n` +
-    `KA Nomor: *${trainNo}*\n` +
-    `Checker: *${session.checker_name}*\n` +
-    `Group Leader: *${session.groupleader_name}*\n` +
-    `Waktu Mulai: *${startTimeStr}*\n` +
-    `Target Selesai: *${targetTimeStr}* (120 Menit / 122 Kontainer)\n` +
-    `Batas Akhir: *${limitTimeStr}* (180 Menit)`;
+  const ref = doc(db, "sessions", sessionId);
+  try {
+    let messageToSend = "";
+    const success = await runTransaction(db, async (transaction) => {
+      const docSnap = await transaction.get(ref);
+      if (!docSnap.exists()) return false;
+      const data = docSnap.data();
+      const pauseTs = timestamp || data.last_paused_timestamp || Math.floor(Date.now() / 1000);
+      const flagKey = `notif_pause_${pauseTs}`;
+      
+      const flags = data.flags || {};
+      if (flags[flagKey]) return false; // Sudah dikirim oleh proses lain!
 
-  await sendFonnteMessageClient(msg);
+      const nowJkt = new Date(pauseTs * 1000).toLocaleTimeString("id-ID", {
+        timeZone: "Asia/Jakarta",
+        hour: "2-digit",
+        minute: "2-digit",
+        hour12: false
+      }) + " WIB";
+
+      const trainNo = formatTrainNumber(data.train_number || session.train_number);
+      messageToSend = `⏳ *Delay Bongkaran ${trainNo} Dimulai*\n\nAlasan Delay: *${reason}*\nWaktu Mulai Delay: *${nowJkt}*\nJumlah Terbongkar: *${data.unloaded_containers || session.unloaded_containers || 0}/122*\nChecker: *${data.checker_name || session.checker_name}*`;
+
+      transaction.update(ref, {
+        [`flags.${flagKey}`]: true
+      });
+      return true;
+    });
+
+    if (success && messageToSend) {
+      await sendFonnteMessageClient(messageToSend);
+    } else {
+      console.log("[Client Pause Fallback] Notifikasi delay dilewati karena sudah ditangani proses lain.");
+    }
+  } catch (err) {
+    console.error("[Client Pause Fallback Lock] Gagal:", err);
+  }
 }
 
-export async function triggerPauseNotificationClient(session: UnloadingSession | any, reason: string): Promise<void> {
-  const nowJkt = new Date().toLocaleTimeString("id-ID", {
-    timeZone: "Asia/Jakarta",
-    hour: "2-digit",
-    minute: "2-digit",
-    hour12: false
-  }) + " WIB";
+export async function triggerResumeNotificationClient(session: UnloadingSession | any, reason: string, durationSeconds: number, timestamp?: number): Promise<void> {
+  const sessionId = session.session_id;
+  if (!sessionId) {
+    console.warn("[Client Resume Fallback] session_id tidak terdefinisi, lewatkan locking.");
+    const durationMinutes = Math.floor((durationSeconds || 0) / 60);
+    const trainNo = formatTrainNumber(session.train_number);
+    const msg = `▶️ *Bongkaran ${trainNo} Dilanjutkan*\n\nHambatan Selesai: *${reason || "Delay selesai"}*\nDurasi Hambatan: *${durationMinutes} Menit*\nJumlah Terbongkar: *${session.unloaded_containers}/122*\nChecker: *${session.checker_name}*`;
+    await sendFonnteMessageClient(msg);
+    return;
+  }
 
-  const trainNo = formatTrainNumber(session.train_number);
-  const msg = `⏳ *Delay Bongkaran ${trainNo} Dimulai*\n\nAlasan Delay: *${reason}*\nWaktu Mulai Delay: *${nowJkt}*\nJumlah Terbongkar: *${session.unloaded_containers}/122*\nChecker: *${session.checker_name}*`;
-  
-  await sendFonnteMessageClient(msg);
-}
+  const ref = doc(db, "sessions", sessionId);
+  try {
+    let messageToSend = "";
+    const success = await runTransaction(db, async (transaction) => {
+      const docSnap = await transaction.get(ref);
+      if (!docSnap.exists()) return false;
+      const data = docSnap.data();
+      
+      const resumeLogs = (data.logs || []).filter((l: any) => l.type === "RESUME");
+      const lastResumeTs = timestamp || (resumeLogs.length > 0 ? resumeLogs[resumeLogs.length - 1].timestamp : Math.floor(Date.now() / 1000));
+      const flagKey = `notif_resume_${lastResumeTs}`;
 
-export async function triggerResumeNotificationClient(session: UnloadingSession | any, reason: string, durationSeconds: number): Promise<void> {
-  const durationMinutes = Math.floor((durationSeconds || 0) / 60);
-  const trainNo = formatTrainNumber(session.train_number);
-  const msg = `▶️ *Bongkaran ${trainNo} Dilanjutkan*\n\nHambatan Selesai: *${reason || "Delay selesai"}*\nDurasi Hambatan: *${durationMinutes} Menit*\nJumlah Terbongkar: *${session.unloaded_containers}/122*\nChecker: *${session.checker_name}*`;
-  
-  await sendFonnteMessageClient(msg);
+      const flags = data.flags || {};
+      if (flags[flagKey]) return false; // Sudah dikirim oleh proses lain!
+
+      const durationMinutes = Math.floor((durationSeconds || (resumeLogs.length > 0 ? resumeLogs[resumeLogs.length - 1].duration_seconds : 0)) / 60);
+      const trainNo = formatTrainNumber(data.train_number || session.train_number);
+      messageToSend = `▶️ *Bongkaran ${trainNo} Dilanjutkan*\n\nHambatan Selesai: *${reason || "Delay selesai"}*\nDurasi Hambatan: *${durationMinutes} Menit*\nJumlah Terbongkar: *${data.unloaded_containers || session.unloaded_containers || 0}/122*\nChecker: *${data.checker_name || session.checker_name}*`;
+
+      transaction.update(ref, {
+        [`flags.${flagKey}`]: true
+      });
+      return true;
+    });
+
+    if (success && messageToSend) {
+      await sendFonnteMessageClient(messageToSend);
+    } else {
+      console.log("[Client Resume Fallback] Notifikasi resume dilewati karena sudah ditangani proses lain.");
+    }
+  } catch (err) {
+    console.error("[Client Resume Fallback Lock] Gagal:", err);
+  }
 }
 
 export async function triggerCompleteNotificationClient(session: UnloadingSession | any): Promise<void> {
-  const finalNetSec = session.net_duration_seconds || 0;
-  const finalGrossSec = session.gross_duration_seconds || 0;
-  const finalChecker = session.checker_name;
-  const finalGroupLeader = session.groupleader_name;
-  const finalTrainNo = formatTrainNumber(session.train_number);
-  const finalLogs = session.logs || [];
-
-  const totalDelaySeconds = finalGrossSec - finalNetSec;
-  const totalDelayMinutes = Math.max(0, Math.floor(totalDelaySeconds / 60));
-  const netMinutes = Math.floor(finalNetSec / 60);
-  const grossMinutes = Math.floor(finalGrossSec / 60);
-
-  const breakdown: Record<string, number> = {};
-  
-  for (let i = 0; i < finalLogs.length; i++) {
-     if (finalLogs[i].type === "PAUSE" && finalLogs[i].reason) {
-        const reason = finalLogs[i].reason;
-        const resumeLog = finalLogs.slice(i).find((l: any) => l.type === "RESUME");
-        const duration = resumeLog?.duration_seconds || 0;
-        const minutes = Math.floor(duration / 60);
-        breakdown[reason] = (breakdown[reason] || 0) + minutes;
-     }
+  const sessionId = session.session_id;
+  if (!sessionId) {
+    console.warn("[Client Complete Fallback] session_id tidak terdefinisi, lewatkan locking.");
+    const finalNetSec = session.net_duration_seconds || 0;
+    const finalGrossSec = session.gross_duration_seconds || 0;
+    const finalChecker = session.checker_name;
+    const finalGroupLeader = session.groupleader_name;
+    const finalTrainNo = formatTrainNumber(session.train_number);
+    const finalLogs = session.logs || [];
+    const totalDelaySeconds = finalGrossSec - finalNetSec;
+    const totalDelayMinutes = Math.max(0, Math.floor(totalDelaySeconds / 60));
+    const netMinutes = Math.floor(finalNetSec / 60);
+    const grossMinutes = Math.floor(finalGrossSec / 60);
+    const breakdown: Record<string, number> = {};
+    for (let i = 0; i < finalLogs.length; i++) {
+       if (finalLogs[i].type === "PAUSE" && finalLogs[i].reason) {
+          const reason = finalLogs[i].reason;
+          const resumeLog = finalLogs.slice(i).find((l: any) => l.type === "RESUME");
+          const duration = resumeLog?.duration_seconds || 0;
+          const minutes = Math.floor(duration / 60);
+          breakdown[reason] = (breakdown[reason] || 0) + minutes;
+       }
+    }
+    const detailStrings = Object.entries(breakdown).map(([reason, minutes]) => `${reason} (${minutes} mnt)`);
+    const delayDetails = detailStrings.length > 0 ? detailStrings.join(", ") : "Tidak Ada Delay";
+    const msg = `✅ *Bongkaran KA Selesai!*\n\nNomor KA: *${finalTrainNo}*\nSelesai Pada: ${new Date().toLocaleDateString("id-ID", { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' })} WIB\nTarget Waktu: *120 Menit*\n*Net Duration:* ${netMinutes} Menit\n*Gross Duration:* ${grossMinutes} Menit (Total Delay *${totalDelayMinutes} Menit*)\n\n*Rincian Delay:* ${delayDetails}\n\nChecker: *${finalChecker}*\nGroup Leader: *${finalGroupLeader}*`;
+    await sendFonnteMessageClient(msg);
+    return;
   }
 
-  const detailStrings = Object.entries(breakdown).map(([reason, minutes]) => `${reason} (${minutes} mnt)`);
-  const delayDetails = detailStrings.length > 0 ? detailStrings.join(", ") : "Tidak Ada Delay";
+  const ref = doc(db, "sessions", sessionId);
+  try {
+    let messageToSend = "";
+    const success = await runTransaction(db, async (transaction) => {
+      const docSnap = await transaction.get(ref);
+      if (!docSnap.exists()) return false;
+      const data = docSnap.data();
+      const flags = data.flags || {};
+      if (flags.notif_completed) return false; // Sudah terkirim!
 
-  const msg = `✅ *Bongkaran KA Selesai!*\n\nNomor KA: *${finalTrainNo}*\nSelesai Pada: ${new Date().toLocaleDateString("id-ID", { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' })} WIB\nTarget Waktu: *120 Menit*\n*Net Duration:* ${netMinutes} Menit\n*Gross Duration:* ${grossMinutes} Menit (Total Delay *${totalDelayMinutes} Menit*)\n\n*Rincian Delay:* ${delayDetails}\n\nChecker: *${finalChecker}*\nGroup Leader: *${finalGroupLeader}*`;
+      const finalNetSec = data.net_duration_seconds !== undefined ? data.net_duration_seconds : (session.net_duration_seconds || 0);
+      const finalGrossSec = data.gross_duration_seconds !== undefined ? data.gross_duration_seconds : (session.gross_duration_seconds || 0);
+      const finalChecker = data.checker_name || session.checker_name || "";
+      const finalGroupLeader = data.groupleader_name || session.groupleader_name || "";
+      const finalTrainNo = formatTrainNumber(data.train_number || session.train_number || "");
+      const finalLogs = data.logs || session.logs || [];
 
-  await sendFonnteMessageClient(msg);
+      const totalDelaySeconds = finalGrossSec - finalNetSec;
+      const totalDelayMinutes = Math.max(0, Math.floor(totalDelaySeconds / 60));
+      const netMinutes = Math.floor(finalNetSec / 60);
+      const grossMinutes = Math.floor(finalGrossSec / 60);
+
+      interface DelayBreakdown { [key: string]: number }
+      const breakdown: DelayBreakdown = {};
+      
+      for (let i = 0; i < finalLogs.length; i++) {
+         if (finalLogs[i].type === "PAUSE" && finalLogs[i].reason) {
+            const reason = finalLogs[i].reason;
+            const resumeLog = finalLogs.slice(i).find((l: any) => l.type === "RESUME");
+            const duration = resumeLog?.duration_seconds || 0;
+            const minutes = Math.floor(duration / 60);
+            breakdown[reason] = (breakdown[reason] || 0) + minutes;
+         }
+      }
+
+      const detailStrings = Object.entries(breakdown).map(([reason, minutes]) => `${reason} (${minutes} mnt)`);
+      const delayDetails = detailStrings.length > 0 ? detailStrings.join(", ") : "Tidak Ada Delay";
+
+      messageToSend = `✅ *Bongkaran KA Selesai!*\n\nNomor KA: *${finalTrainNo}*\nSelesai Pada: ${new Date().toLocaleDateString("id-ID", { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' })} WIB\nTarget Waktu: *120 Menit*\n*Net Duration:* ${netMinutes} Menit\n*Gross Duration:* ${grossMinutes} Menit (Total Delay *${totalDelayMinutes} Menit*)\n\n*Rincian Delay:* ${delayDetails}\n\nChecker: *${finalChecker}*\nGroup Leader: *${finalGroupLeader}*`;
+
+      transaction.update(ref, {
+        "flags.notif_completed": true
+      });
+      return true;
+    });
+
+    if (success && messageToSend) {
+      await sendFonnteMessageClient(messageToSend);
+    } else {
+      console.log("[Client Complete Fallback] Notifikasi penyelesaian dilewati karena sudah terkirim.");
+    }
+  } catch (err) {
+    console.error("[Client Complete Fallback Lock] Gagal:", err);
+  }
 }
 
 export async function triggerRevisionNotificationClient(

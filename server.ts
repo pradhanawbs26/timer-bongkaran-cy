@@ -310,7 +310,13 @@ async function runTimerSimulationEngine() {
 
     const nowSeconds = Math.floor(Date.now() / 1000);
 
-    if (querySnapshot.empty) {
+    // Ambil sesi berstatus "COMPLETED" yang flag notifikasi selesainya belum bernilai true
+    const qCompleted = query(sessionsRef, where("status", "==", "COMPLETED"), where("flags.notif_completed", "==", false));
+    const completedSnapshot = await getDocs(qCompleted);
+
+    const allDocs = [...querySnapshot.docs, ...completedSnapshot.docs];
+
+    if (allDocs.length === 0) {
       if (nowSeconds % 30 < 5) {
         console.log(`[Simulation Engine] Engine is active. 0 active/paused/completed sessions currently found.`);
       }
@@ -318,9 +324,9 @@ async function runTimerSimulationEngine() {
       return;
     }
 
-    console.log(`[Simulation Engine] Running. Found ${querySnapshot.size} session(s) in active monitoring.`);
+    console.log(`[Simulation Engine] Running. Found ${allDocs.length} session(s) in active monitoring (Active: ${querySnapshot.size}, Unsent Completed: ${completedSnapshot.size}).`);
 
-    for (const document of querySnapshot.docs) {
+    for (const document of allDocs) {
       const session = document.data();
       const sessionId = document.id;
       const ref = doc(db, "sessions", sessionId);
@@ -374,7 +380,22 @@ async function runTimerSimulationEngine() {
           const detailStrings = Object.entries(breakdown).map(([reason, minutes]) => `${reason} (${minutes} mnt)`);
           const delayDetails = detailStrings.length > 0 ? detailStrings.join(", ") : "Tidak Ada Delay";
 
-          const msg = `✅ *Bongkaran KA Selesai!*\n\nNomor KA: *${finalTrainNo}*\nSelesai Pada: ${new Date().toLocaleDateString("id-ID", { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' })} WIB\nTarget Waktu: *120 Menit*\n*Net Duration:* ${netMinutes} Menit\n*Gross Duration:* ${grossMinutes} Menit (Total Delay *${totalDelayMinutes} Menit*)\n\n*Rincian Delay:* ${delayDetails}\n\nChecker: *${finalChecker}*\nGroup Leader: *${finalGroupLeader}*`;
+          const endTs = (session.start_timestamp || 0) + finalGrossSec;
+          const endJktDate = new Date(endTs * 1000).toLocaleDateString("id-ID", {
+            timeZone: "Asia/Jakarta",
+            weekday: 'long',
+            year: 'numeric',
+            month: 'long',
+            day: 'numeric'
+          });
+          const endJktTime = new Date(endTs * 1000).toLocaleTimeString("id-ID", {
+            timeZone: "Asia/Jakarta",
+            hour: "2-digit",
+            minute: "2-digit",
+            hour12: false
+          }) + " WIB";
+
+          const msg = `✅ *Bongkaran KA Selesai!*\n\nNomor KA: *${finalTrainNo}*\nSelesai Pada: *${endJktDate} pukul ${endJktTime}*\nTarget Waktu: *120 Menit*\n*Net Duration:* ${netMinutes} Menit\n*Gross Duration:* ${grossMinutes} Menit (Total Delay *${totalDelayMinutes} Menit*)\n\n*Rincian Delay:* ${delayDetails}\n\nChecker: *${finalChecker}*\nGroup Leader: *${finalGroupLeader}*`;
 
           await attemptSendNotificationWithLock(sessionId, "notif_completed", () => msg);
         }
@@ -396,6 +417,46 @@ async function runTimerSimulationEngine() {
       };
 
       const trainNo = formatTrainNumber(session.train_number);
+
+      // --- PENJAMIN NOTIFIKASI DELAY/JEDA & RESUME BACKING ENGINE ---
+      // Menjamin notifikasi jeda (PAUSE) dan lanjut (RESUME) terkirim secara konsisten meskipun aplikasi/AI Studio ditutup.
+      
+      // 1. Jika statusnya PAUSED, pastikan notifikasi pause untuk timestamp ini sudah dikirim
+      if (session.status === "PAUSED" && session.last_paused_timestamp) {
+        const pauseTs = session.last_paused_timestamp;
+        const flagKey = `notif_pause_${pauseTs}`;
+        if (!flags[flagKey]) {
+          const pauseLogs = logs.filter((l: any) => l.type === "PAUSE");
+          const reason = pauseLogs.length > 0 ? pauseLogs[pauseLogs.length - 1].reason : "Delay operasional";
+
+          const nowJkt = new Date(pauseTs * 1000).toLocaleTimeString("id-ID", {
+            timeZone: "Asia/Jakarta",
+            hour: "2-digit",
+            minute: "2-digit",
+            hour12: false
+          }) + " WIB";
+
+          const msg = `⏳ *Delay Bongkaran ${trainNo} Dimulai*\n\nAlasan Delay: *${reason}*\nWaktu Mulai Delay: *${nowJkt}*\nJumlah Terbongkar: *${session.unloaded_containers || 0}/122*\nChecker: *${session.checker_name}*`;
+
+          await attemptSendNotificationWithLock(sessionId, flagKey, () => msg);
+        }
+      }
+
+      // 2. Evaluasi semua log RESUME untuk memastikan tidak ada notifikasi resume yang terlewatkan
+      const resumeLogs = logs.filter((l: any) => l.type === "RESUME");
+      for (const log of resumeLogs) {
+        const resumeTs = log.timestamp;
+        const flagKey = `notif_resume_${resumeTs}`;
+        if (!flags[flagKey]) {
+          const precedingPauses = logs.filter((l: any) => l.type === "PAUSE" && l.timestamp < resumeTs);
+          const reason = precedingPauses.length > 0 ? precedingPauses[precedingPauses.length - 1].reason : "Delay selesai";
+          const durationMinutes = Math.floor((log.duration_seconds || 0) / 60);
+
+          const msg = `▶️ *Bongkaran ${trainNo} Dilanjutkan*\n\nHambatan Selesai: *${reason}*\nDurasi Hambatan: *${durationMinutes} Menit*\nJumlah Terbongkar: *${session.unloaded_containers || 0}/122*\nChecker: *${session.checker_name}*`;
+
+          await attemptSendNotificationWithLock(sessionId, flagKey, () => msg);
+        }
+      }
 
       // 1. Durasi kotor (gross)
       const elapsedGross = nowSeconds - startTimestamp;
@@ -925,50 +986,66 @@ app.post("/api/sessions/:id/revise-notif", async (req, res) => {
 // API Endpoint untuk Notifikasi Mulai Delay (PAUSE)
 app.post("/api/sessions/:id/pause-notif", async (req, res) => {
   const { id } = req.params;
-  const { reason } = req.body;
+  const { reason, timestamp } = req.body;
   const lockKey = `${id}-${reason}`;
 
   try {
     if (activeSendingLocks.pauses.has(lockKey)) {
-      return res.json({ success: true, message: "Notifikasi delay mulai untuk alasan ini sudah diproses." });
+      return res.json({ success: true, message: "Notifikasi delay mulai untuk alasan ini sedang diduplikasi atau diproses." });
     }
     activeSendingLocks.pauses.add(lockKey);
 
-    let session: any = null;
-    const docSnap = await getDoc(doc(db, "sessions", id));
+    let docId = id;
+    let ref = doc(db, "sessions", id);
+    let messageToSend = "";
 
-    if (docSnap.exists()) {
-      session = docSnap.data();
-    } else {
-      const snapshot = await getDocs(query(collection(db, "sessions"), where("session_id", "==", id)));
-      if (!snapshot.empty) {
-        session = snapshot.docs[0].data();
+    const success = await runTransaction(db, async (transaction) => {
+      let docSnap = await transaction.get(ref);
+      if (!docSnap.exists()) {
+        const snapshot = await getDocs(query(collection(db, "sessions"), where("session_id", "==", id)));
+        if (!snapshot.empty) {
+          docId = snapshot.docs[0].id;
+          ref = doc(db, "sessions", docId);
+          docSnap = await transaction.get(ref);
+        } else {
+          return false;
+        }
       }
-    }
 
-    if (!session) {
-      activeSendingLocks.pauses.delete(lockKey);
-      return res.status(404).json({ error: "Sesi tidak ditemukan" });
-    }
-    
-    const nowJkt = new Date().toLocaleTimeString("id-ID", {
-      timeZone: "Asia/Jakarta",
-      hour: "2-digit",
-      minute: "2-digit",
-      hour12: false
-    }) + " WIB";
+      const session = docSnap.data();
+      const pauseTs = timestamp || session.last_paused_timestamp || Math.floor(Date.now() / 1000);
+      const flagKey = `notif_pause_${pauseTs}`;
+      
+      const flags = session.flags || {};
+      if (flags[flagKey]) return false; // Sudah dikirim oleh proses lain!
 
-    const trainNo = formatTrainNumber(session.train_number);
-    const msg = `⏳ *Delay Bongkaran ${trainNo} Dimulai*\n\nAlasan Delay: *${reason}*\nWaktu Mulai Delay: *${nowJkt}*\nJumlah Terbongkar: *${session.unloaded_containers}/122*\nChecker: *${session.checker_name}*`;
-    
-    await sendFonnteMessage(msg);
+      const nowJkt = new Date(pauseTs * 1000).toLocaleTimeString("id-ID", {
+        timeZone: "Asia/Jakarta",
+        hour: "2-digit",
+        minute: "2-digit",
+        hour12: false
+      }) + " WIB";
 
-    // Hapus dari lock setelah 20 detik untuk mengizinkan delay dengan alasan sama di lain waktu
+      const trainNo = formatTrainNumber(session.train_number);
+      messageToSend = `⏳ *Delay Bongkaran ${trainNo} Dimulai*\n\nAlasan Delay: *${reason}*\nWaktu Mulai Delay: *${nowJkt}*\nJumlah Terbongkar: *${session.unloaded_containers || 0}/122*\nChecker: *${session.checker_name}*`;
+
+      transaction.update(ref, {
+        [`flags.${flagKey}`]: true
+      });
+      return true;
+    });
+
+    // Lepas lock lokal setelah 15 detik
     setTimeout(() => {
       activeSendingLocks.pauses.delete(lockKey);
-    }, 20000);
+    }, 15000);
 
-    res.json({ success: true });
+    if (success && messageToSend) {
+      await sendFonnteMessage(messageToSend);
+      return res.json({ success: true, message: "Pesan berhasil terkirim." });
+    }
+
+    return res.json({ success: true, message: "Pesan dilewati karena sudah pernah terkirim sebelumnya." });
   } catch (error: any) {
     activeSendingLocks.pauses.delete(lockKey);
     res.status(500).json({ error: error.message });
@@ -978,45 +1055,61 @@ app.post("/api/sessions/:id/pause-notif", async (req, res) => {
 // API Endpoint untuk Notifikasi Delay Selesai (RESUME)
 app.post("/api/sessions/:id/resume-notif", async (req, res) => {
   const { id } = req.params;
-  const { duration_seconds, reason } = req.body;
+  const { duration_seconds, reason, timestamp } = req.body;
   const lockKey = `${id}-${reason}`;
 
   try {
     if (activeSendingLocks.resumes.has(lockKey)) {
-      return res.json({ success: true, message: "Notifikasi delay selesai untuk alasan ini sudah diproses." });
+      return res.json({ success: true, message: "Notifikasi delay selesai untuk alasan ini sedang diduplikasi atau diproses." });
     }
     activeSendingLocks.resumes.add(lockKey);
 
-    let session: any = null;
-    const docSnap = await getDoc(doc(db, "sessions", id));
+    let docId = id;
+    let ref = doc(db, "sessions", id);
+    let messageToSend = "";
 
-    if (docSnap.exists()) {
-      session = docSnap.data();
-    } else {
-      const snapshot = await getDocs(query(collection(db, "sessions"), where("session_id", "==", id)));
-      if (!snapshot.empty) {
-        session = snapshot.docs[0].data();
+    const success = await runTransaction(db, async (transaction) => {
+      let docSnap = await transaction.get(ref);
+      if (!docSnap.exists()) {
+        const snapshot = await getDocs(query(collection(db, "sessions"), where("session_id", "==", id)));
+        if (!snapshot.empty) {
+          docId = snapshot.docs[0].id;
+          ref = doc(db, "sessions", docId);
+          docSnap = await transaction.get(ref);
+        } else {
+          return false;
+        }
       }
-    }
 
-    if (!session) {
-      activeSendingLocks.resumes.delete(lockKey);
-      return res.status(404).json({ error: "Sesi tidak ditemukan" });
-    }
-    
-    const durationMinutes = Math.floor((duration_seconds || 0) / 60);
+      const session = docSnap.data();
+      const resumeLogs = (session.logs || []).filter((l: any) => l.type === "RESUME");
+      const lastResumeTs = timestamp || (resumeLogs.length > 0 ? resumeLogs[resumeLogs.length - 1].timestamp : Math.floor(Date.now() / 1000));
+      const flagKey = `notif_resume_${lastResumeTs}`;
 
-    const trainNo = formatTrainNumber(session.train_number);
-    const msg = `▶️ *Bongkaran ${trainNo} Dilanjutkan*\n\nHambatan Selesai: *${reason || "Delay selesai"}*\nDurasi Hambatan: *${durationMinutes} Menit*\nJumlah Terbongkar: *${session.unloaded_containers}/122*\nChecker: *${session.checker_name}*`;
-    
-    await sendFonnteMessage(msg);
+      const flags = session.flags || {};
+      if (flags[flagKey]) return false; // Sudah dikirim oleh proses lain!
 
-    // Hapus dari lock setelah 20 detik
+      const durationMinutes = Math.floor((duration_seconds || (resumeLogs.length > 0 ? resumeLogs[resumeLogs.length - 1].duration_seconds : 0)) / 60);
+      const trainNo = formatTrainNumber(session.train_number);
+      messageToSend = `▶️ *Bongkaran ${trainNo} Dilanjutkan*\n\nHambatan Selesai: *${reason || "Delay selesai"}*\nDurasi Hambatan: *${durationMinutes} Menit*\nJumlah Terbongkar: *${session.unloaded_containers || 0}/122*\nChecker: *${session.checker_name}*`;
+
+      transaction.update(ref, {
+        [`flags.${flagKey}`]: true
+      });
+      return true;
+    });
+
+    // Lepas lock lokal setelah 15 detik
     setTimeout(() => {
       activeSendingLocks.resumes.delete(lockKey);
-    }, 20000);
+    }, 15000);
 
-    res.json({ success: true });
+    if (success && messageToSend) {
+      await sendFonnteMessage(messageToSend);
+      return res.json({ success: true, message: "Pesan berhasil terkirim." });
+    }
+
+    return res.json({ success: true, message: "Pesan dilewati karena sudah pernah terkirim sebelumnya." });
   } catch (error: any) {
     activeSendingLocks.resumes.delete(lockKey);
     res.status(500).json({ error: error.message });

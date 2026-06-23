@@ -115,6 +115,7 @@ export default function InitializeSession({ onStart }: InitializeSessionProps) {
           console.warn("Gagal mengirim notif mulai via API, mencoba fallback client-side:", err);
           import("../utils/whatsappNotification").then(({ triggerStartNotificationClient }) => {
             triggerStartNotificationClient({
+              session_id: generatedSessionId,
               train_number: formattedTrainNumber,
               checker_name: checkerName.trim(),
               groupleader_name: groupLeaderName.trim(),

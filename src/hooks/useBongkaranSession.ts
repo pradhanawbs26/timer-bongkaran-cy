@@ -244,6 +244,7 @@ export function useBongkaranSession(sessionId: string | null) {
       updatePayload.status = "COMPLETED";
       updatePayload.net_duration_seconds = elapsedNet;
       updatePayload.gross_duration_seconds = elapsedGross;
+      updatePayload["flags.notif_completed"] = false;
     }
 
     await updateDoc(docRef, updatePayload);
@@ -317,7 +318,7 @@ export function useBongkaranSession(sessionId: string | null) {
     fetch(`/api/sessions/${sessionId}/pause-notif`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ reason })
+      body: JSON.stringify({ reason, timestamp: nowSeconds })
     })
     .then(async (res) => {
       if (!res.ok) throw new Error(`API returned ${res.status}`);
@@ -325,7 +326,7 @@ export function useBongkaranSession(sessionId: string | null) {
     .catch((err) => {
       console.warn("Gagal mengirim pause notif via API, mencoba fallback client-side:", err);
       import("../utils/whatsappNotification").then(({ triggerPauseNotificationClient }) => {
-        triggerPauseNotificationClient(session, reason);
+        triggerPauseNotificationClient(session, reason, nowSeconds);
       });
     });
   }, [session, sessionId]);
@@ -361,7 +362,7 @@ export function useBongkaranSession(sessionId: string | null) {
     fetch(`/api/sessions/${sessionId}/resume-notif`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ duration_seconds: delayDuration, reason })
+      body: JSON.stringify({ duration_seconds: delayDuration, reason, timestamp: nowSeconds })
     })
     .then(async (res) => {
       if (!res.ok) throw new Error(`API returned ${res.status}`);
@@ -369,7 +370,7 @@ export function useBongkaranSession(sessionId: string | null) {
     .catch((err) => {
       console.warn("Gagal mengirim resume notif via API, mencoba fallback client-side:", err);
       import("../utils/whatsappNotification").then(({ triggerResumeNotificationClient }) => {
-        triggerResumeNotificationClient(session, reason, delayDuration);
+        triggerResumeNotificationClient(session, reason, delayDuration, nowSeconds);
       });
     });
   }, [session, sessionId]);
@@ -399,6 +400,7 @@ export function useBongkaranSession(sessionId: string | null) {
       net_duration_seconds: elapsedNet > 0 ? elapsedNet : 0,
       gross_duration_seconds: elapsedGross > 0 ? elapsedGross : 0,
       last_paused_timestamp: null,
+      "flags.notif_completed": false,
     });
   }, [session, sessionId]);
 
@@ -515,6 +517,7 @@ export function useBongkaranSession(sessionId: string | null) {
         notif_110m: false,
         notif_120m: false,
         notif_180m: false,
+        notif_completed: false,
       },
       last_overtime_notif: null,
       last_overtime_interval: 0,
