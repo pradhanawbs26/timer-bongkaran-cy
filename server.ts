@@ -56,8 +56,8 @@ app.get("/api/get-firebase-mode", (req, res) => {
  * agar dapat dipantau di UI Dashboard secara langsung oleh user.
  */
 async function sendFonnteMessage(message: string): Promise<void> {
-  const activeApiKey = "iNfrBRnqQj4izhPo4PKL";
-  const activeTargetGroup = "628117882902-1623340497@g.us";
+  const activeApiKey = process.env.FONNTE_API_KEY || "iNfrBRnqQj4izhPo4PKL";
+  const activeTargetGroup = process.env.FONNTE_TARGET_GROUP || "628117882902-1623340497@g.us";
 
   console.log(`[Fonnte Service] Mengirim Pesan WhatsApp:\nTarget: ${activeTargetGroup}\n--- START MESSAGE ---\n${message}\n--- END MESSAGE ---`);
 
@@ -866,4 +866,8 @@ async function startServer() {
   });
 }
 
-startServer();
+if (!process.env.VERCEL) {
+  startServer();
+}
+
+export default app;
