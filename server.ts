@@ -2,7 +2,6 @@ import express from "express";
 import path from "path";
 import dotenv from "dotenv";
 import fs from "fs";
-import { createServer as createViteServer } from "vite";
 import { initializeApp } from "firebase/app";
 import { 
   getFirestore, 
@@ -848,6 +847,7 @@ app.post("/api/sessions/:id/resume-notif", async (req, res) => {
 // Mounting Vite middleware untuk melayani frontend React dalam mode dev dan prod
 async function startServer() {
   if (process.env.NODE_ENV !== "production") {
+    const { createServer: createViteServer } = await import("vite");
     const vite = await createViteServer({
       server: { middlewareMode: true },
       appType: "spa",
