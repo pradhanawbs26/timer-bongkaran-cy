@@ -1,9 +1,29 @@
 import { db } from "../firebaseClient";
-import { collection, addDoc } from "firebase/firestore";
+import { collection, addDoc, doc, getDoc } from "firebase/firestore";
 import { UnloadingSession } from "../types";
 
-const activeApiKey = (import.meta as any).env.VITE_FONNTE_API_KEY || "iNfrBRnqQj4izhPo4PKL";
-const activeTargetGroup = (import.meta as any).env.VITE_FONNTE_TARGET_GROUP || "628117882902-1623340497@g.us";
+/**
+ * Ambil konfigurasi Fonnte secara dinamis dari dokumen Firestore (sessions/settings_fonnte).
+ */
+async function getFonnteCredentialsClient(): Promise<{ apiKey: string; targetGroup: string }> {
+  try {
+    const docSnap = await getDoc(doc(db, "sessions", "settings_fonnte"));
+    if (docSnap.exists()) {
+      const data = docSnap.data();
+      if (data.apiKey && data.targetGroup) {
+        return {
+          apiKey: data.apiKey,
+          targetGroup: data.targetGroup
+        };
+      }
+    }
+  } catch (err) {
+    console.warn("[Client Fonnte credentials] Gagal mengambil dari Firestore:", err);
+  }
+  const apiKey = (import.meta as any).env.VITE_FONNTE_API_KEY || "iNfrBRnqQj4izhPo4PKL";
+  const targetGroup = (import.meta as any).env.VITE_FONNTE_TARGET_GROUP || "628117882902-1623340497@g.us";
+  return { apiKey, targetGroup };
+}
 
 /**
  * Helper to ensure a train number starts with exactly one 'KA-' prefix.
@@ -21,6 +41,10 @@ export function formatTrainNumber(no: string): string {
  * Logs the output to Firestore "fonnte_logs" so it updates the web UI feed in real-time.
  */
 export async function sendFonnteMessageClient(message: string): Promise<boolean> {
+  const creds = await getFonnteCredentialsClient();
+  const activeApiKey = creds.apiKey;
+  const activeTargetGroup = creds.targetGroup;
+
   console.log(`[Client Fonnte Service] Mengirim Pesan WhatsApp:\nTarget: ${activeTargetGroup}\n--- START MESSAGE ---\n${message}\n--- END MESSAGE ---`);
 
   // Try 3 protocol levels for absolute reliability (JSON, URL encoded, or GET)

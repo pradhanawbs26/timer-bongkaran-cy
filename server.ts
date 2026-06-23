@@ -54,9 +54,34 @@ app.get("/api/get-firebase-mode", (req, res) => {
  * dan sekaligus mencatat pengiriman ke Firestore di koleksi "fonnte_logs"
  * agar dapat dipantau di UI Dashboard secara langsung oleh user.
  */
+/**
+ * Ambil konfigurasi WhatsApp Fonnte secara dinamis dari dokumen di Firestore (sessions/settings_fonnte).
+ * Jika ada perubahan di UI, langsung terbaca di server secara instant tanpa restart container.
+ */
+async function getFonnteCredentials(): Promise<{ apiKey: string; targetGroup: string }> {
+  try {
+    const docSnap = await getDoc(doc(db, "sessions", "settings_fonnte"));
+    if (docSnap.exists()) {
+      const data = docSnap.data();
+      if (data.apiKey && data.targetGroup) {
+        return {
+          apiKey: data.apiKey,
+          targetGroup: data.targetGroup
+        };
+      }
+    }
+  } catch (err) {
+    console.warn("[Fonnte Credentials] Gagal mengambil konfigurasi dari Firestore, menggunakan fallback env/default:", err);
+  }
+  const apiKey = process.env.FONNTE_API_KEY || process.env.VITE_FONNTE_API_KEY || "iNfrBRnqQj4izhPo4PKL";
+  const targetGroup = process.env.FONNTE_TARGET_GROUP || process.env.VITE_FONNTE_TARGET_GROUP || "628117882902-1623340497@g.us";
+  return { apiKey, targetGroup };
+}
+
 async function sendFonnteMessage(message: string): Promise<void> {
-  const activeApiKey = process.env.FONNTE_API_KEY || process.env.VITE_FONNTE_API_KEY || "iNfrBRnqQj4izhPo4PKL";
-  const activeTargetGroup = process.env.FONNTE_TARGET_GROUP || process.env.VITE_FONNTE_TARGET_GROUP || "628117882902-1623340497@g.us";
+  const creds = await getFonnteCredentials();
+  const activeApiKey = creds.apiKey;
+  const activeTargetGroup = creds.targetGroup;
 
   console.log(`[Fonnte Service] Mengirim Pesan WhatsApp:\nTarget: ${activeTargetGroup}\n--- START MESSAGE ---\n${message}\n--- END MESSAGE ---`);
 
@@ -516,6 +541,22 @@ app.post("/api/sessions/:id/tick", async (req, res) => {
   } catch (error: any) {
     console.error("[Tick Error] Gagal memproses tick:", error);
     return res.status(500).json({ error: error.message || "Gagal memproses tick" });
+  }
+});
+
+// API Endpoint untuk menguji coba koneksi Fonnte secara langsung
+app.post("/api/test-fonnte", async (req, res) => {
+  const { message } = req.body;
+  if (!message) {
+    return res.status(400).json({ error: "Pesan tidak boleh kosong." });
+  }
+  try {
+    console.log("[Fonnte Test] Mengirim pesan uji coba...");
+    await sendFonnteMessage(message);
+    return res.json({ success: true, message: "Pesan uji coba telah diproses." });
+  } catch (err: any) {
+    console.error("[Fonnte Test] Gagal mengirim pesan uji coba:", err);
+    return res.status(500).json({ error: err.message || "Gagal mengirim pesan uji coba." });
   }
 });
 
