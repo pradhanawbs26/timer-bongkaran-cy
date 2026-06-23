@@ -123,6 +123,74 @@ export function useBongkaranSession(sessionId: string | null) {
     return () => clearInterval(tickInterval);
   }, [sessionId, session?.status]);
 
+  // Client-Side Active Milestone Trigger
+  // Ketika browser dalam kondisi aktif menampilkan timer berjalan, ia akan memantau waktu murni (net) secara real-time.
+  // Jika mendeteksi transisi milestone (60m, 100m, 110m, 120m, 180m, atau kelipatan overtime), browser langsung
+  // menembak backend untuk mentransmisikan notifikasi WhatsApp Fonnte secara instan dan akurat.
+  // Penggunaan write/lock transaksi terdistribusi di sisi server menjamin 100% bebas dari segala bentuk duplikasi pesan.
+  useEffect(() => {
+    if (!sessionId || !session || session.status !== "RUNNING" || liveNetSeconds <= 0) return;
+
+    const netMinutes = Math.floor(liveNetSeconds / 60);
+    const flags = session.flags || {};
+    
+    let milestoneToTrigger: string | null = null;
+    let otInterval = 0;
+
+    if (netMinutes >= 180 && !flags.notif_180m) {
+      milestoneToTrigger = "180m";
+    } else if (netMinutes >= 120 && !flags.notif_120m) {
+      milestoneToTrigger = "120m";
+    } else if (netMinutes >= 110 && !flags.notif_110m) {
+      milestoneToTrigger = "110m";
+    } else if (netMinutes >= 100 && !flags.notif_100m) {
+      milestoneToTrigger = "100m";
+    } else if (netMinutes >= 60 && !flags.notif_60m) {
+      milestoneToTrigger = "60m";
+    } else if (netMinutes >= 120) {
+      // Hitung kelipatan interval overtime 10 menit bersih melampaui sisa target 120m
+      const excessMinutes = netMinutes - 120;
+      const currentInterval = Math.floor(excessMinutes / 10);
+      const lastOvertimeInterval = session.last_overtime_interval !== undefined && session.last_overtime_interval !== null
+        ? session.last_overtime_interval
+        : 0;
+
+      if (currentInterval > lastOvertimeInterval) {
+        milestoneToTrigger = "overtime";
+        otInterval = currentInterval;
+      }
+    }
+
+    if (milestoneToTrigger) {
+      const lockKey = milestoneToTrigger === "overtime" ? `overtime_${otInterval}` : milestoneToTrigger;
+      
+      // Cegah request ganda berturut-turut dari siklus render internal milik instance browser yang sama
+      if (clientPushedFlagsRef.current[lockKey]) {
+        return;
+      }
+      clientPushedFlagsRef.current[lockKey] = true;
+
+      console.log(`[Client Trigger] Mendeteksi milestone ${lockKey} tercapai (${netMinutes} mnt murni), memicu API...`);
+      fetch(`/api/sessions/${sessionId}/trigger-milestone`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          milestone: milestoneToTrigger,
+          currentInterval: milestoneToTrigger === "overtime" ? otInterval : undefined
+        })
+      })
+      .then(async (res) => {
+        const data = await res.json();
+        console.log(`[Client Trigger] Hasil pemicuan milestone ${lockKey}:`, data);
+      })
+      .catch((err) => {
+        console.error(`[Client Trigger] Gagal pemicuan milestone ${lockKey}:`, err);
+        // Lepas lock lokal agar dapat dicoba lagi jika ada kendala jaringan transient
+        clientPushedFlagsRef.current[lockKey] = false;
+      });
+    }
+  }, [sessionId, session, liveNetSeconds]);
+
   // Tambah jumlah kontainer (+)
   const incrementContainers = useCallback(async (amount: number = 1) => {
     if (!session || !sessionId) return;

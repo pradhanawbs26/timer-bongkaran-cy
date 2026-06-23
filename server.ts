@@ -539,7 +539,11 @@ app.get("/api/cron-evaluate", async (req, res) => {
     });
   } catch (error: any) {
     console.error("[Cron API] Gagal memproses evaluasi timer:", error);
-    return res.status(500).json({ error: error.message });
+    return res.status(200).json({ 
+      success: false, 
+      message: "Terjadi kesalahan internal saat pemrosesan cron.",
+      error: error.message || "Unknown error" 
+    });
   }
 });
 
@@ -561,6 +565,107 @@ app.post("/api/cron-evaluate", async (req, res) => {
     });
   } catch (error: any) {
     console.error("[Cron API] Gagal memproses evaluasi timer:", error);
+    return res.status(200).json({ 
+      success: false, 
+      message: "Terjadi kesalahan internal saat pemrosesan cron.",
+      error: error.message || "Unknown error" 
+    });
+  }
+});
+
+// API Endpoint untuk memicu notifikasi milestone secara mandiri dan aman dari client-side
+app.post("/api/sessions/:id/trigger-milestone", async (req, res) => {
+  const { id } = req.params;
+  const { milestone, currentInterval } = req.body;
+
+  try {
+    let session: any = null;
+    let docId = id;
+    const docSnap = await getDoc(doc(db, "sessions", id));
+
+    if (docSnap.exists()) {
+      session = docSnap.data();
+    } else {
+      const snapshot = await getDocs(query(collection(db, "sessions"), where("session_id", "==", id)));
+      if (!snapshot.empty) {
+        session = snapshot.docs[0].data();
+        docId = snapshot.docs[0].id;
+      }
+    }
+
+    if (!session) {
+      return res.status(404).json({ error: "Sesi tidak ditemukan" });
+    }
+
+    // Hanya teruskan jika status sesi sedang aktif (RUNNING)
+    if (session.status !== "RUNNING" && milestone !== "completed") {
+      return res.json({ success: false, message: "Sesi sedang tidak berjalan (tidak dalam status RUNNING)." });
+    }
+
+    const trainNo = formatTrainNumber(session.train_number);
+    const flags = session.flags || {};
+    const startTimestamp = session.start_timestamp;
+    const nowSeconds = Math.floor(Date.now() / 1000);
+
+    // Hitung total akumulasi durasi pause (dari tabulasi RESUME)
+    let totalPausedSeconds = 0;
+    const logs = session.logs || [];
+    logs.forEach((log: any) => {
+      if (log.type === "RESUME" && log.duration_seconds) {
+        totalPausedSeconds += log.duration_seconds;
+      }
+    });
+
+    if (session.status === "PAUSED" && session.last_paused_timestamp) {
+      totalPausedSeconds += (nowSeconds - session.last_paused_timestamp);
+    }
+
+    const elapsedNet = (nowSeconds - startTimestamp) - totalPausedSeconds;
+    const elapsedNetMinutes = Math.floor(elapsedNet / 60);
+
+    let flagKey = "";
+    let messageToSend = "";
+
+    switch (milestone) {
+      case "60m":
+        flagKey = "notif_60m";
+        messageToSend = `⏳ *Info 60 Menit Bongkaran ${trainNo}*\n\nSiklus bongkaran telah berjalan 60 menit bersih.\nKontainer Terbongkar: *${session.unloaded_containers || 0}/122*.\nChecker: *${session.checker_name}*`;
+        break;
+      case "100m":
+        flagKey = "notif_100m";
+        messageToSend = `⚠️ *Peringatan 100 Menit (Sisa 20 Menit Target)!*\n\nBongkaran ${trainNo} telah berjalan *100 Menit*.\nStatus Kontainer: *${session.unloaded_containers || 0}* Terbongkar, *${122 - (session.unloaded_containers || 0)}* Sisa.\nHarap tingkatkan koordinasi operasional!`;
+        break;
+      case "110m":
+        flagKey = "notif_110m";
+        messageToSend = `⚠️ *Peringatan 110 Menit (Sisa 10 Menit Target)!*\n\nBongkaran ${trainNo} mendekati batas target standar (Sisa 10 Menit).\nStatus Kontainer: *${session.unloaded_containers || 0}/122* Terbongkar.\nHarap optimalkan kecepatan pembongkaran!`;
+        break;
+      case "120m":
+        flagKey = "notif_120m";
+        messageToSend = `🚨 *CRITICAL! Waktu Target Melampaui 120 Menit!*\n\nBongkaran ${trainNo} melebihi batas standar (120 Menit).\nDurasi Bersih saat ini: *${elapsedNetMinutes > 0 ? elapsedNetMinutes : 120} Menit*.\nKontainer Terbongkar: *${session.unloaded_containers || 0}/122*.\nButuh eskalasi cepat di lapangan!`;
+        break;
+      case "180m":
+        flagKey = "notif_180m";
+        messageToSend = `🛑 *MERAH! Batas Akhir 180 Menit Dilanggar!*\n\nBongkaran ${trainNo} berada di batas merah operasional.\nDurasi Bersih: *${elapsedNetMinutes > 0 ? elapsedNetMinutes : 180} Menit*.\nStatus Kontainer: *${session.unloaded_containers || 0}/122*. Checker: *${session.checker_name}*`;
+        break;
+      case "overtime":
+        if (typeof currentInterval !== "number") {
+          return res.status(400).json({ error: "Interval harus valid untuk bertipe overtime" });
+        }
+        const msg = `⚠️ *Peringatan Overtime Berkala! Durasi Melebihi Target (+${currentInterval * 10} Menit)*\n\nBongkaran ${trainNo} telah melebihi target waktu standar.\nDurasi murni saat ini: *${elapsedNetMinutes > 0 ? elapsedNetMinutes : 120 + currentInterval * 10} Menit* murni.\nStatus Kontainer: *${session.unloaded_containers || 0}/122* Terbongkar.\nChecker: *${session.checker_name}*\nGroup Leader: *${session.groupleader_name}*`;
+        const successOvertime = await attemptSendOvertimeIntervalNotificationWithLock(docId, currentInterval, () => msg);
+        return res.json({ success: successOvertime });
+      default:
+        return res.status(400).json({ error: "Milestone tidak dikenal atau tidak didukung" });
+    }
+
+    if (flags[flagKey]) {
+      return res.json({ success: true, message: `Notifikasi ${milestone} sudah pernah terkirim sebelumnya.` });
+    }
+
+    const success = await attemptSendNotificationWithLock(docId, flagKey, () => messageToSend);
+    return res.json({ success, message: success ? `Notifikasi ${milestone} berhasil terkirim!` : `Gagal mengirim atau sudah terkirim.` });
+  } catch (error: any) {
+    console.error(`[Trigger Milestone API] Gagal memproses milestone ${milestone}:`, error);
     return res.status(500).json({ error: error.message });
   }
 });

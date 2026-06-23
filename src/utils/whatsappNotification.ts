@@ -2,8 +2,8 @@ import { db } from "../firebaseClient";
 import { collection, addDoc } from "firebase/firestore";
 import { UnloadingSession } from "../types";
 
-const activeApiKey = "iNfrBRnqQj4izhPo4PKL";
-const activeTargetGroup = "628117882902-1623340497@g.us";
+const activeApiKey = (import.meta as any).env.VITE_FONNTE_API_KEY || "iNfrBRnqQj4izhPo4PKL";
+const activeTargetGroup = (import.meta as any).env.VITE_FONNTE_TARGET_GROUP || "628117882902-1623340497@g.us";
 
 /**
  * Helper to ensure a train number starts with exactly one 'KA-' prefix.
