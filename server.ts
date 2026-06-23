@@ -502,8 +502,10 @@ async function runTimerSimulationEngine() {
   }
 }
 
-// Jalankan engine pendeteksi status dan timer setiap 5 detik
-setInterval(runTimerSimulationEngine, 5000);
+// Jalankan engine pendeteksi status dan timer setiap 5 detik (hanya jika bukan di serverless Vercel)
+if (!process.env.VERCEL) {
+  setInterval(runTimerSimulationEngine, 5000);
+}
 
 // API Endpoint untuk memproses pembaruan timer (tick/ping) dari client (browser) secara real-time
 app.post("/api/sessions/:id/tick", async (req, res) => {
